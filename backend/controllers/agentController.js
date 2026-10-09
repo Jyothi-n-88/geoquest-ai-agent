@@ -56,37 +56,69 @@ async function stageRouteForApproval({ userPrompt, proposedRoute, thoughts }) {
 /**
  * Deterministic ReAct cognitive runner (executes full tool pipeline if API key missing or transient API spike)
  */
-async function executeDeterministicReAct({ prompt, thoughts, toolCallsMade, reason = '' }) {
+async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, toolCallsMade, reason = '' }) {
   if (reason) {
     thoughts.push(`Reasoning Note: ${reason} - executing resilient ReAct spatial planning loop.`);
   }
 
+  const isNearMe =
+    /\b(near me|nearby|around here|around me|close to me|in my area|close by)\b/i.test(prompt);
+
   const cityMatch = prompt.match(/\b(bengaluru|bangalore|mumbai|delhi|mysuru)\b/i);
-  const targetCity = cityMatch ? cityMatch[1] : 'Bengaluru';
+
+  // If user requested near me:
+  // If userCoordinates are provided, use them directly; otherwise use default city
+  const effectiveCoords = userCoordinates || (isNearMe ? [77.5946, 12.9716] : null);
+  const targetCity = isNearMe
+    ? (userCoordinates ? `Current GPS [${userCoordinates[0].toFixed(3)}, ${userCoordinates[1].toFixed(3)}]` : 'City Default (Proximity Fallback)')
+    : cityMatch
+    ? cityMatch[1]
+    : 'Bengaluru';
+
+  thoughts.push(
+    isNearMe
+      ? `Spatial ReAct Goal: Proximity discovery requested ("near me"). Anchoring search to coordinates: [${effectiveCoords[0]}, ${effectiveCoords[1]}].`
+      : `Spatial ReAct Goal: Planning itinerary for destination "${targetCity}".`
+  );
 
   // 1. Fetch Weather
-  const weatherRes = await toolHandlers.fetch_weather({ city: targetCity });
+  const weatherRes = await toolHandlers.fetch_weather({
+    city: isNearMe ? 'Current Location' : targetCity,
+  });
   toolCallsMade.push({
     tool: 'fetch_weather',
-    args: { city: targetCity },
+    args: { city: isNearMe ? 'Current Location' : targetCity },
     output: weatherRes,
     id: `call_${Date.now()}_1`,
   });
-  thoughts.push(`Observed Weather in ${targetCity}: ${weatherRes.condition}, ${weatherRes.temperatureC}°C (${weatherRes.recommendation})`);
+  thoughts.push(`Observed Weather: ${weatherRes.condition}, ${weatherRes.temperatureC}°C (${weatherRes.recommendation})`);
 
-  // 2. Search Places
-  const placesRes = await toolHandlers.search_places({ query: 'heritage and cafe', category: '', city: targetCity });
+  // 2. Search Places - Feeding userCoordinates directly rather than a hardcoded city center
+  const placesRes = await toolHandlers.search_places({
+    query: prompt,
+    category: '',
+    city: isNearMe ? '' : targetCity,
+    userCoordinates: effectiveCoords,
+  });
   toolCallsMade.push({
     tool: 'search_places',
-    args: { query: 'heritage and cafe', city: targetCity },
+    args: {
+      query: prompt,
+      city: isNearMe ? '' : targetCity,
+      userCoordinates: effectiveCoords,
+    },
     output: placesRes,
     id: `call_${Date.now()}_2`,
   });
-  thoughts.push(`Identified ${placesRes.count} candidate waypoints in ${targetCity}. Selecting top 3 balanced stops.`);
+  thoughts.push(
+    isNearMe && effectiveCoords
+      ? `Located ${placesRes.count} venues situated within immediate proximity of coordinates [${effectiveCoords[0].toFixed(4)}, ${effectiveCoords[1].toFixed(4)}].`
+      : `Identified ${placesRes.count} candidate waypoints in ${targetCity}. Selecting optimal stops.`
+  );
 
   const selectedPlaces = placesRes.places.slice(0, 3);
 
-  // 3. Calculate Route
+  // 3. Calculate Route - Feeding discovered locations into route calculation
   const routeRes = await toolHandlers.calculate_route({ locations: selectedPlaces });
   toolCallsMade.push({
     tool: 'calculate_route',
@@ -97,13 +129,19 @@ async function executeDeterministicReAct({ prompt, thoughts, toolCallsMade, reas
   thoughts.push(`Calculated optimal spatial sequence: ${routeRes.totalDistanceKm} km, ~${routeRes.estimatedDurationMinutes} mins.`);
 
   // 4. Propose Itinerary (Human Oversight Gatekeeper)
+  const proposalTitle = isNearMe
+    ? 'Local Proximity Discovery Trail (Near Me)'
+    : `${targetCity.charAt(0).toUpperCase() + targetCity.slice(1)} Curated Spatial Tour`;
+
   const proposalRes = await toolHandlers.propose_itinerary({
-    title: `${targetCity.charAt(0).toUpperCase() + targetCity.slice(1)} Curated Spatial Tour`,
+    title: proposalTitle,
     locations: selectedPlaces,
     totalDistanceKm: routeRes.totalDistanceKm,
     estimatedDurationMinutes: routeRes.estimatedDurationMinutes,
     weatherNote: `${weatherRes.condition}, ${weatherRes.temperatureC}°C.`,
-    agentReasoning: `Organized an optimal trail from ${selectedPlaces[0]?.name || 'start'} to ${selectedPlaces[selectedPlaces.length - 1]?.name || 'finish'}.`,
+    agentReasoning: isNearMe
+      ? `Curated an optimized walking and exploration loop relative to your current coordinates.`
+      : `Organized an optimal trail from ${selectedPlaces[0]?.name || 'start'} to ${selectedPlaces[selectedPlaces.length - 1]?.name || 'finish'}.`,
   });
   toolCallsMade.push({
     tool: 'propose_itinerary',
@@ -133,9 +171,10 @@ async function executeDeterministicReAct({ prompt, thoughts, toolCallsMade, reas
 /**
  * POST /api/agent/command
  * Autonomous ReAct Cognitive Loop
+ * Accepts prompt and userLocation { lat, lng } from request body
  */
 export async function handleAgentCommand(req, res) {
-  const { prompt, history = [] } = req.body;
+  const { prompt, history = [], userLocation } = req.body;
 
   if (!prompt || typeof prompt !== 'string') {
     return res.status(400).json({
@@ -143,6 +182,20 @@ export async function handleAgentCommand(req, res) {
       error: 'Prompt string is required in request body.',
     });
   }
+
+  // Parse user coordinates [lng, lat]
+  let userCoords = null;
+  if (userLocation && typeof userLocation === 'object') {
+    const lat = Number(userLocation.lat ?? userLocation.latitude);
+    const lng = Number(userLocation.lng ?? userLocation.longitude);
+    if (!isNaN(lat) && !isNaN(lng)) {
+      userCoords = [lng, lat]; // [longitude, latitude] GeoJSON format
+    }
+  }
+
+  // Check if prompt contains proximity phrases like "near me", "nearby", "around here"
+  const isNearMe =
+    /\b(near me|nearby|around here|around me|close to me|in my area|close by)\b/i.test(prompt);
 
   const thoughts = [];
   const toolCallsMade = [];
@@ -153,7 +206,7 @@ export async function handleAgentCommand(req, res) {
   const isKeyConfigured = apiKey && !apiKey.includes('MY_GEMINI_API_KEY') && apiKey.length > 10;
 
   // SYSTEM INSTRUCTION for GeoQuest ReAct Agent
-  const systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent.
+  let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent.
 Your mission is to interpret user trip commands, reason about spatial constraints, and use function calling tools to assemble an optimal itinerary.
 
 OPERATIONAL PROTOCOL (ReAct Loop):
@@ -164,9 +217,18 @@ OPERATIONAL PROTOCOL (ReAct Loop):
 5. Action: Call 'propose_itinerary' to package the finalized GeoJSON and request Human Oversight approval.
 6. STRICT RULE: Every spatial itinerary write is irreversible and MUST conclude by invoking 'propose_itinerary' to trigger human approval. NEVER fabricate coordinates; always use search_places.`;
 
+  if (isNearMe || userCoords) {
+    const coordsToUse = userCoords || [77.5946, 12.9716];
+    systemInstruction += `\n7. PROXIMITY & "NEAR ME" DIRECTIVE: The user's active coordinates are [longitude: ${coordsToUse[0]}, latitude: ${coordsToUse[1]}].
+The user prompt asks for spots 'near me', 'nearby', or 'around here'.
+You MUST pass userCoordinates: [${coordsToUse[0]}, ${coordsToUse[1]}] to 'search_places' and leave the 'city' parameter blank so the system discovers venues situated directly around their live coordinates instead of searching a hardcoded city center.
+Then pass those discovered proximity waypoints into 'calculate_route' and 'propose_itinerary'.`;
+  }
+
   if (!isKeyConfigured) {
     const fallbackResponse = await executeDeterministicReAct({
       prompt,
+      userCoordinates: userCoords,
       thoughts,
       toolCallsMade,
       reason: 'GEMINI_API_KEY not configured',
@@ -219,6 +281,7 @@ OPERATIONAL PROTOCOL (ReAct Loop):
         console.warn(`⚠️ [GeoQuest Agent] Gemini call failed (${geminiError.message}). Fallback to resilient ReAct pipeline.`);
         const fallbackResponse = await executeDeterministicReAct({
           prompt,
+          userCoordinates: userCoords,
           thoughts,
           toolCallsMade,
           reason: `Gemini API temporary spike (${geminiError.message})`,
@@ -246,7 +309,18 @@ OPERATIONAL PROTOCOL (ReAct Loop):
 
       for (const call of functionCalls) {
         const toolName = call.name;
-        const toolArgs = call.args || {};
+        const toolArgs = { ...(call.args || {}) };
+
+        // If "near me" prompt or userCoords available, feed userCoordinates directly into search_places and override hardcoded city
+        if (toolName === 'search_places') {
+          if (isNearMe) {
+            toolArgs.userCoordinates = userCoords || [77.5946, 12.9716];
+            toolArgs.city = ''; // Prevent searching hardcoded city center
+          } else if (userCoords && !toolArgs.userCoordinates) {
+            toolArgs.userCoordinates = userCoords;
+          }
+        }
+
         const handler = toolHandlers[toolName];
 
         let toolOutput;
@@ -314,6 +388,7 @@ OPERATIONAL PROTOCOL (ReAct Loop):
     console.error('❌ [GeoQuest Agent Fatal Error]:', error);
     const fallbackResponse = await executeDeterministicReAct({
       prompt,
+      userCoordinates: userCoords,
       thoughts,
       toolCallsMade,
       reason: error.message,

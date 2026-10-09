@@ -43,10 +43,17 @@ export const searchPlacesDeclaration = {
       },
       city: {
         type: Type.STRING,
-        description: 'The city where the search should be conducted.',
+        description: 'The city or region where the search should be conducted.',
+      },
+      userCoordinates: {
+        type: Type.ARRAY,
+        description: 'Optional current coordinates [longitude, latitude] of the user for "near me" or proximity searches.',
+        items: {
+          type: Type.NUMBER,
+        },
       },
     },
-    required: ['query', 'city'],
+    required: ['query'],
   },
 };
 

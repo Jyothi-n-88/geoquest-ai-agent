@@ -24,7 +24,7 @@ export function calculateHaversineDistance(coord1, coord2) {
 }
 
 /**
- * Builds a standardized GeoJSON FeatureCollection for Mapbox GL JS
+ * Builds a standardized GeoJSON FeatureCollection for Mapbox GL JS / MapLibre
  */
 export function buildGeoJSONFeatureCollection(locations, routeTitle = 'Spatial Itinerary') {
   const features = [];
@@ -44,6 +44,8 @@ export function buildGeoJSONFeatureCollection(locations, routeTitle = 'Spatial I
         name: loc.name,
         category: loc.category || 'landmark',
         description: loc.description || '',
+        rating: loc.rating || 4.5,
+        distanceFromUserKm: loc.distanceFromUserKm ?? null,
       },
     });
   });
@@ -78,6 +80,29 @@ export function buildGeoJSONFeatureCollection(locations, routeTitle = 'Spatial I
 export async function handleFetchWeather(args) {
   const city = (args.city || '').trim();
   const lowerCity = city.toLowerCase();
+
+  // If user requested near me / local coordinates
+  if (
+    lowerCity.includes('near me') ||
+    lowerCity.includes('current location') ||
+    lowerCity.includes('here') ||
+    lowerCity.includes('proximity') ||
+    !city
+  ) {
+    return {
+      city: 'Current Location',
+      date: args.date || 'today',
+      temperatureC: 25,
+      condition: 'Clear & Favorable',
+      precipitationProb: '5%',
+      humidity: '52%',
+      windSpeed: '10 km/h',
+      uvIndex: 'Moderate',
+      recommendation:
+        'Pleasant micro-climate conditions around your local coordinates. Ideal for outdoor walking or cafe hopping.',
+      fetchedAt: new Date().toISOString(),
+    };
+  }
 
   const weatherDatabase = {
     bengaluru: {
@@ -138,7 +163,7 @@ export async function handleFetchWeather(args) {
   };
 
   return {
-    city,
+    city: city || 'Local Area',
     date: args.date || 'today',
     ...weather,
     fetchedAt: new Date().toISOString(),
@@ -147,14 +172,37 @@ export async function handleFetchWeather(args) {
 
 /**
  * 2. search_places Handler
+ * Feeds live user coordinates directly into proximity discovery for "near me" prompts
  */
 export async function handleSearchPlaces(args) {
-  const city = (args.city || 'Bengaluru').trim();
+  const city = (args.city || '').trim();
   const query = (args.query || '').toLowerCase();
   const categoryFilter = (args.category || '').toLowerCase();
   const lowerCity = city.toLowerCase();
 
-  // Curated spatial POI knowledge base with accurate coordinates
+  // Normalize user coordinates [lng, lat]
+  let userCoords = null;
+  if (Array.isArray(args.userCoordinates) && args.userCoordinates.length === 2) {
+    const lng = Number(args.userCoordinates[0]);
+    const lat = Number(args.userCoordinates[1]);
+    if (!isNaN(lng) && !isNaN(lat)) {
+      userCoords = [lng, lat];
+    }
+  } else if (args.userCoordinates && typeof args.userCoordinates === 'object') {
+    const lat = args.userCoordinates.lat ?? args.userCoordinates.latitude;
+    const lng = args.userCoordinates.lng ?? args.userCoordinates.longitude;
+    if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+      userCoords = [lng, lat];
+    }
+  }
+
+  const isNearMeQuery =
+    Boolean(userCoords) ||
+    /\b(near me|nearby|around here|around me|close to me|in my area|close by)\b/i.test(query) ||
+    /\b(near me|nearby|around here|around me)\b/i.test(lowerCity) ||
+    !city;
+
+  // Curated spatial POI database
   const placesDatabase = {
     bengaluru: [
       {
@@ -292,67 +340,143 @@ export async function handleSearchPlaces(args) {
     ],
   };
 
-  const cityKey = lowerCity.includes('bangalore') || lowerCity.includes('bengaluru')
-    ? 'bengaluru'
-    : lowerCity.includes('mumbai')
-    ? 'mumbai'
-    : lowerCity.includes('delhi')
-    ? 'delhi'
-    : null;
+  let candidatePlaces = [];
 
-  let candidatePlaces = cityKey ? placesDatabase[cityKey] : [];
+  // When user coordinates are provided, search relative to user coordinates
+  if (userCoords) {
+    const allKnown = [...placesDatabase.bengaluru, ...placesDatabase.mumbai, ...placesDatabase.delhi];
+    const nearbyFromDb = allKnown
+      .map((p) => ({
+        ...p,
+        distanceFromUserKm: calculateHaversineDistance(userCoords, p.coordinates),
+      }))
+      .filter((p) => p.distanceFromUserKm <= 35)
+      .sort((a, b) => a.distanceFromUserKm - b.distanceFromUserKm);
 
-  // If city not found in static list, synthesize high-quality realistic spots
-  if (candidatePlaces.length === 0) {
-    const defaultCenter = [77.5946, 12.9716]; // Fallback coordinates
-    candidatePlaces = [
-      {
-        name: `${city} Central Heritage Landmark`,
-        category: 'heritage',
-        coordinates: [defaultCenter[0] + 0.01, defaultCenter[1] + 0.01],
-        description: `Notable historic monument and cultural attraction in ${city}.`,
-        rating: 4.5,
-      },
-      {
-        name: `${city} Botanical Gardens`,
-        category: 'nature',
-        coordinates: [defaultCenter[0] - 0.015, defaultCenter[1] - 0.008],
-        description: `Serene urban green space and botanical preservation area in ${city}.`,
-        rating: 4.6,
-      },
-      {
-        name: `The Roastery Cafe ${city}`,
-        category: 'cafe',
-        coordinates: [defaultCenter[0] + 0.025, defaultCenter[1] - 0.015],
-        description: `Specialty third-wave coffee roaster serving pour-overs and bakery treats.`,
-        rating: 4.8,
-      },
-    ];
-  }
+    if (nearbyFromDb.length >= 2) {
+      candidatePlaces = nearbyFromDb;
+    } else {
+      // Synthesize hyper-local high-fidelity POIs directly situated around user coordinates
+      const [uLng, uLat] = userCoords;
+      const synthList = [
+        {
+          name: 'The Neighborhood Artisan Cafe & Roastery',
+          category: 'cafe',
+          coordinates: [Number((uLng + 0.006).toFixed(6)), Number((uLat + 0.004).toFixed(6))],
+          description: 'Specialty pour-overs, single-origin espressos, and fresh sourdough pastries situated close to your current location.',
+          rating: 4.8,
+        },
+        {
+          name: 'Community Heritage Landmark & Historic Clock Tower',
+          category: 'heritage',
+          coordinates: [Number((uLng - 0.008).toFixed(6)), Number((uLat + 0.007).toFixed(6))],
+          description: 'Prominent local architectural monument and heritage square featuring scenic pedestrian paths.',
+          rating: 4.6,
+        },
+        {
+          name: 'Urban Botanical Green Space & Nature Trail',
+          category: 'nature',
+          coordinates: [Number((uLng + 0.004).toFixed(6)), Number((uLat - 0.009).toFixed(6))],
+          description: 'Lush neighborhood park with shaded canopy, walking trails, and serene water fountains.',
+          rating: 4.7,
+        },
+        {
+          name: 'Craft Bakery & Single-Origin Espresso Bar',
+          category: 'cafe',
+          coordinates: [Number((uLng - 0.005).toFixed(6)), Number((uLat - 0.006).toFixed(6))],
+          description: 'Artisanal breakfast pastries and cold brew flights situated within walking proximity.',
+          rating: 4.9,
+        },
+        {
+          name: 'Panoramic Promenade & Cultural Pavilion',
+          category: 'landmark',
+          coordinates: [Number((uLng + 0.009).toFixed(6)), Number((uLat + 0.008).toFixed(6))],
+          description: 'Elevated viewpoint with open vistas, public sculptures, and shaded rest benches.',
+          rating: 4.6,
+        },
+      ];
 
-  // Filter by category or search query if applicable
-  let filtered = candidatePlaces;
-  if (categoryFilter) {
-    filtered = filtered.filter((p) => p.category.toLowerCase() === categoryFilter);
-  }
-  if (query && filtered.length > 0) {
-    const matching = filtered.filter(
-      (p) =>
-        p.name.toLowerCase().includes(query) ||
-        p.description.toLowerCase().includes(query) ||
-        p.category.toLowerCase().includes(query)
-    );
-    if (matching.length > 0) {
-      filtered = matching;
+      candidatePlaces = synthList.map((p) => ({
+        ...p,
+        distanceFromUserKm: calculateHaversineDistance(userCoords, p.coordinates),
+      }));
     }
+  } else {
+    // If no userCoords, resolve by city name
+    const cityKey = lowerCity.includes('bangalore') || lowerCity.includes('bengaluru')
+      ? 'bengaluru'
+      : lowerCity.includes('mumbai')
+      ? 'mumbai'
+      : lowerCity.includes('delhi')
+      ? 'delhi'
+      : null;
+
+    candidatePlaces = cityKey ? placesDatabase[cityKey] : [];
+
+    if (candidatePlaces.length === 0) {
+      const defaultCenter = [77.5946, 12.9716];
+      candidatePlaces = [
+        {
+          name: `${city || 'City'} Central Heritage Landmark`,
+          category: 'heritage',
+          coordinates: [defaultCenter[0] + 0.01, defaultCenter[1] + 0.01],
+          description: `Notable historic monument and cultural attraction in ${city || 'the area'}.`,
+          rating: 4.5,
+        },
+        {
+          name: `${city || 'City'} Botanical Gardens`,
+          category: 'nature',
+          coordinates: [defaultCenter[0] - 0.015, defaultCenter[1] - 0.008],
+          description: `Serene urban green space and botanical preservation area in ${city || 'the area'}.`,
+          rating: 4.6,
+        },
+        {
+          name: `The Roastery Cafe ${city || 'Downtown'}`,
+          category: 'cafe',
+          coordinates: [defaultCenter[0] + 0.025, defaultCenter[1] - 0.015],
+          description: `Specialty third-wave coffee roaster serving pour-overs and bakery treats.`,
+          rating: 4.8,
+        },
+      ];
+    }
+  }
+
+  let filtered = [...candidatePlaces];
+
+  // Apply category filter if specified
+  if (categoryFilter && categoryFilter !== 'all') {
+    const matchedCategory = filtered.filter((p) => p.category.toLowerCase() === categoryFilter);
+    if (matchedCategory.length > 0) {
+      filtered = matchedCategory;
+    }
+  }
+
+  // If query contains specific intent keywords like "cafe", "coffee", "park", "heritage", prioritize matching places
+  const isCafeSearch = query.includes('cafe') || query.includes('coffee') || query.includes('bakery') || query.includes('espresso');
+  const isHeritageSearch = query.includes('heritage') || query.includes('monument') || query.includes('history') || query.includes('palace');
+  const isNatureSearch = query.includes('nature') || query.includes('park') || query.includes('garden') || query.includes('green');
+
+  if (isCafeSearch) {
+    const cafeMatches = filtered.filter((p) => p.category === 'cafe' || p.name.toLowerCase().includes('cafe') || p.name.toLowerCase().includes('coffee'));
+    const others = filtered.filter((p) => !cafeMatches.includes(p));
+    filtered = [...cafeMatches, ...others];
+  } else if (isHeritageSearch) {
+    const heritageMatches = filtered.filter((p) => p.category === 'heritage' || p.category === 'landmark');
+    const others = filtered.filter((p) => !heritageMatches.includes(p));
+    filtered = [...heritageMatches, ...others];
+  } else if (isNatureSearch) {
+    const natureMatches = filtered.filter((p) => p.category === 'nature');
+    const others = filtered.filter((p) => !natureMatches.includes(p));
+    filtered = [...natureMatches, ...others];
   }
 
   return {
     query: args.query,
-    city,
+    city: isNearMeQuery ? 'Current Geolocation (Near Me)' : city || 'Curated Region',
     category: categoryFilter || 'all',
+    userCoordinates: userCoords,
     count: filtered.length,
-    places: filtered.slice(0, 6),
+    places: filtered.slice(0, 5),
   };
 }
 

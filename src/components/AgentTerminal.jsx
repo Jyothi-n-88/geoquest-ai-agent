@@ -20,6 +20,9 @@ import {
   ArrowRight,
   Mic,
   MicOff,
+  Navigation,
+  AlertTriangle,
+  Info,
 } from 'lucide-react';
 
 export default function AgentTerminal({
@@ -28,7 +31,7 @@ export default function AgentTerminal({
   onRouteApproved,
 }) {
   const [prompt, setPrompt] = useState(
-    'Plan a 1-day heritage and cafe crawl in Bengaluru with 3 curated spots'
+    'Find specialty artisan cafes and scenic spots near me'
   );
   const [loading, setLoading] = useState(false);
   const [agentResponse, setAgentResponse] = useState(null);
@@ -37,51 +40,114 @@ export default function AgentTerminal({
   const [approvalNotes, setApprovalNotes] = useState('Route reviewed and approved by user');
   const [expandedTools, setExpandedTools] = useState({});
 
-  // Voice Web Speech API state variables
+  // Web Speech API Voice States
   const [isListening, setIsListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
+  const [speechToast, setSpeechToast] = useState(null); // { message, type: 'error' | 'info' }
   const recognitionRef = useRef(null);
 
-  // Check Web Speech API support on mount
+  // Browser Geolocation ("Near Me") State
+  const [userLocation, setUserLocation] = useState(null); // { lat, lng }
+  const [geoStatus, setGeoStatus] = useState('detecting'); // 'detecting' | 'detected' | 'denied' | 'unsupported'
+
+  // Capture user coordinates using navigator.geolocation
+  const detectUserLocation = (showToastNotice = false) => {
+    if (!('geolocation' in navigator)) {
+      console.warn('⚠️ [GeoQuest GPS] Geolocation API not supported in this browser.');
+      setGeoStatus('unsupported');
+      return;
+    }
+
+    setGeoStatus('detecting');
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        const coords = {
+          lat: Number(latitude.toFixed(5)),
+          lng: Number(longitude.toFixed(5)),
+        };
+        setUserLocation(coords);
+        setGeoStatus('detected');
+        console.log(`📍 [GeoQuest GPS] Detected live coordinates: lat=${coords.lat}, lng=${coords.lng}`);
+        if (showToastNotice) {
+          setSpeechToast({
+            type: 'info',
+            message: `📍 GPS Detected: [${coords.lat}, ${coords.lng}]. Ready for "near me" commands.`,
+          });
+        }
+      },
+      (error) => {
+        console.warn('⚠️ [GeoQuest GPS] Geolocation capture failed or denied:', error.message);
+        setGeoStatus('denied');
+        if (showToastNotice) {
+          setSpeechToast({
+            type: 'info',
+            message: '⚠️ Location permission denied. The agent will use city default coordinates.',
+          });
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 8000,
+        maximumAge: 60000,
+      }
+    );
+  };
+
+  // Check Web Speech API support & trigger Geolocation on initial mount
   useEffect(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
-    setSpeechSupported(Boolean(SpeechRecognition));
+    const supported = Boolean(SpeechRecognition);
+    setSpeechSupported(supported);
+    console.log(`🎤 [GeoQuest Speech] Web Speech API supported: ${supported}`);
+
+    // Detect user coordinates on initial mount
+    detectUserLocation(false);
 
     return () => {
       if (recognitionRef.current) {
         try {
           recognitionRef.current.abort();
         } catch {
-          // Ignore abort errors on cleanup
+          // Cleanup ignore
         }
       }
     };
   }, []);
 
-  // Web Speech API toggle function
+  // Web Speech API Voice Toggle with robust logging and user error notifications
   const toggleListening = () => {
+    setSpeechToast(null);
+
+    // If currently listening, stop the session cleanly
     if (isListening) {
+      console.log('🎤 [GeoQuest Speech] Stopping active speech recognition session...');
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
         } catch (e) {
-          console.warn('Speech stop error:', e);
+          console.warn('⚠️ [GeoQuest Speech] Stop error:', e);
         }
       }
       setIsListening(false);
       return;
     }
 
+    // Check browser support
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert('Speech Recognition is not supported by your current browser.');
+      const err = 'Speech Recognition is not supported in this browser. Please use Google Chrome, Edge, or Safari.';
+      console.error('❌ [GeoQuest Speech]', err);
+      setSpeechToast({ type: 'error', message: err });
+      alert(err);
       return;
     }
 
     try {
+      console.log('🎤 [GeoQuest Speech] Initializing SpeechRecognition instance...');
       const recognition = new SpeechRecognition();
       recognitionRef.current = recognition;
 
@@ -90,7 +156,12 @@ export default function AgentTerminal({
       recognition.lang = 'en-US';
 
       recognition.onstart = () => {
+        console.log('🎤 [GeoQuest Speech] Speech recognition session STARTED. Listening for voice input...');
         setIsListening(true);
+        setSpeechToast({
+          type: 'info',
+          message: '🎙️ Listening... Speak your destination command (e.g., "Find cafes near me")',
+        });
       };
 
       recognition.onresult = (event) => {
@@ -98,51 +169,110 @@ export default function AgentTerminal({
         for (let i = event.resultIndex; i < event.results.length; i++) {
           transcript += event.results[i][0].transcript;
         }
+        console.log(`🎤 [GeoQuest Speech] Transcribed speech: "${transcript}"`);
         if (transcript.trim()) {
           setPrompt(transcript.trim());
         }
       };
 
       recognition.onerror = (event) => {
-        console.warn('Speech recognition error:', event.error);
+        console.warn('⚠️ [GeoQuest Speech] Recognition error encountered:', event.error);
         setIsListening(false);
+
+        let errorMsg = `Speech recognition error: ${event.error}`;
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          errorMsg = 'Microphone permission blocked. Please click the lock/camera icon in your address bar to allow microphone access.';
+          alert(errorMsg);
+        } else if (event.error === 'no-speech') {
+          errorMsg = 'No speech detected. Please speak closer to your microphone and try again.';
+        } else if (event.error === 'audio-capture') {
+          errorMsg = 'No microphone device was detected on your computer.';
+          alert(errorMsg);
+        } else if (event.error === 'network') {
+          errorMsg = 'Network connection issue during speech recognition.';
+        }
+
+        setSpeechToast({ type: 'error', message: errorMsg });
       };
 
       recognition.onend = () => {
+        console.log('🎤 [GeoQuest Speech] Speech recognition session ENDED.');
         setIsListening(false);
       };
 
+      console.log('🎤 [GeoQuest Speech] Calling recognition.start()...');
       recognition.start();
-    } catch (err) {
-      console.warn('Speech recognition start failed:', err);
+    } catch (startErr) {
+      console.error('❌ [GeoQuest Speech] Failed to start recognition instance:', startErr);
       setIsListening(false);
+      const errMsg = `Failed to start microphone: ${startErr.message}. Check browser permissions.`;
+      setSpeechToast({ type: 'error', message: errMsg });
+      alert(errMsg);
     }
   };
 
   const samplePrompts = [
+    'Find specialty artisan cafes and scenic spots near me',
+    'Plan an afternoon walking discovery trail around here',
     'Plan a 1-day heritage and cafe crawl in Bengaluru with 3 curated spots',
     'Find coastal heritage sights and specialty coffee in Mumbai',
-    'Curate a morning monument trail and cafe in Delhi',
   ];
 
-  // Submit Prompt to ReAct Agent endpoint
+  // Submit Prompt to ReAct Agent endpoint with userLocation payload
   const handleExecute = async (customPrompt) => {
     const textToRun = customPrompt || prompt;
     if (!textToRun.trim() || loading) return;
 
-    // Stop listening if currently active
     if (isListening && recognitionRef.current) {
-      recognitionRef.current.stop();
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
       setIsListening(false);
     }
 
     setLoading(true);
     setApprovalStatus(null);
+    setSpeechToast(null);
+
+    // If geolocation hasn't been captured yet and browser supports it, do a quick capture
+    let activeCoords = userLocation;
+    if (!activeCoords && 'geolocation' in navigator && geoStatus !== 'denied') {
+      try {
+        await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              activeCoords = {
+                lat: Number(pos.coords.latitude.toFixed(5)),
+                lng: Number(pos.coords.longitude.toFixed(5)),
+              };
+              setUserLocation(activeCoords);
+              setGeoStatus('detected');
+              resolve();
+            },
+            () => resolve(),
+            { timeout: 2500 }
+          );
+        });
+      } catch {
+        // Proceed with null if timeout
+      }
+    }
+
+    // Payload includes userLocation: { lat, lng }
+    const payload = {
+      prompt: textToRun,
+      userLocation: activeCoords ? { lat: activeCoords.lat, lng: activeCoords.lng } : null,
+    };
+
+    console.log('🚀 [GeoQuest Command] Sending request to POST /api/agent/command:', payload);
+
     try {
       const res = await fetch('/api/agent/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: textToRun }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       setAgentResponse(data);
@@ -154,6 +284,7 @@ export default function AgentTerminal({
         setApprovalStatus('requires_approval');
       }
     } catch (err) {
+      console.error('❌ [GeoQuest Command Error]:', err);
       setAgentResponse({
         success: false,
         thoughts: [`Error during ReAct execution: ${err.message}`],
@@ -228,7 +359,7 @@ export default function AgentTerminal({
 
         <div className="flex items-center gap-2">
           {isListening && (
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-950/80 border border-red-700/80 text-[10px] text-red-300 font-mono animate-pulse">
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-red-950/90 border border-red-600 text-[10px] text-red-300 font-mono animate-pulse shadow-md shadow-red-500/20">
               <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-ping" />
               <span>Listening...</span>
             </div>
@@ -239,6 +370,32 @@ export default function AgentTerminal({
           </div>
         </div>
       </div>
+
+      {/* Speech Notification Banner / Toast */}
+      {speechToast && (
+        <div
+          className={`mx-4 mt-3 p-2.5 rounded-xl text-xs flex items-start gap-2 shadow-lg transition animate-fadeIn ${
+            speechToast.type === 'error'
+              ? 'bg-amber-950/70 border border-amber-600/80 text-amber-200'
+              : 'bg-cyan-950/70 border border-cyan-700/80 text-cyan-200'
+          }`}
+        >
+          {speechToast.type === 'error' ? (
+            <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+          ) : (
+            <Info className="h-4 w-4 text-cyan-400 shrink-0 mt-0.5" />
+          )}
+          <div className="flex-1 text-[11px] leading-tight">
+            <span>{speechToast.message}</span>
+          </div>
+          <button
+            onClick={() => setSpeechToast(null)}
+            className="text-slate-400 hover:text-white font-bold px-1"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Scrollable Feed */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -398,7 +555,47 @@ export default function AgentTerminal({
       </div>
 
       {/* Input Bar at Bottom */}
-      <div className="p-3.5 border-t border-slate-800 bg-slate-900/90">
+      <div className="p-3.5 border-t border-slate-800 bg-slate-900/95 space-y-2">
+        {/* GPS Location Indicator Badge */}
+        <div className="flex items-center justify-between text-[11px] font-mono px-1">
+          <button
+            onClick={() => detectUserLocation(true)}
+            title="Click to refresh browser GPS coordinates"
+            className="flex items-center gap-1.5 text-slate-300 hover:text-cyan-300 transition group"
+          >
+            <Navigation
+              className={`h-3.5 w-3.5 transition-transform ${
+                geoStatus === 'detecting'
+                  ? 'animate-spin text-cyan-400'
+                  : geoStatus === 'detected'
+                  ? 'text-emerald-400'
+                  : 'text-amber-400'
+              }`}
+            />
+            <span className="font-medium">
+              {geoStatus === 'detected' && userLocation
+                ? `📍 Location: Detected (${userLocation.lat}, ${userLocation.lng})`
+                : geoStatus === 'detecting'
+                ? '📍 Location: Detecting GPS...'
+                : '📍 Location: City Default'}
+            </span>
+            <span className="text-[10px] text-slate-500 group-hover:text-slate-400 underline ml-1">
+              {geoStatus === 'detected' ? '(Refresh)' : '(Click to Detect)'}
+            </span>
+          </button>
+
+          {geoStatus === 'detected' && userLocation ? (
+            <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              GPS Ready for "Near Me"
+            </span>
+          ) : (
+            <span className="text-[10px] text-slate-500">
+              Using Fallback Center
+            </span>
+          )}
+        </div>
+
         <div className="flex items-center gap-2">
           <input
             type="text"
@@ -409,11 +606,11 @@ export default function AgentTerminal({
             placeholder={
               isListening
                 ? 'Listening... Speak your destination command...'
-                : 'Type or speak a spatial command...'
+                : 'Type or speak a spatial command (e.g. Find cafes near me)...'
             }
             className={`flex-1 bg-slate-950 border rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none transition ${
               isListening
-                ? 'border-red-500/80 shadow-sm shadow-red-500/20'
+                ? 'border-red-500/80 shadow-md shadow-red-500/20'
                 : 'border-slate-700 focus:border-cyan-500'
             }`}
           />
@@ -440,9 +637,11 @@ export default function AgentTerminal({
           ) : (
             <button
               type="button"
-              disabled
+              onClick={() => {
+                alert('Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.');
+              }}
               title="Speech recognition not supported in this browser"
-              className="p-2 rounded-xl border border-slate-800 bg-slate-900 text-slate-600 cursor-not-allowed shrink-0"
+              className="p-2 rounded-xl border border-slate-800 bg-slate-900 text-slate-600 hover:text-slate-400 shrink-0"
             >
               <MicOff className="h-4 w-4" />
             </button>
