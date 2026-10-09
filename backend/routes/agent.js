@@ -17,19 +17,19 @@ const router = express.Router();
 router.get('/', (req, res) => {
   res.json({
     name: 'GeoQuest Autonomous Spatial Planning ReAct Agent',
-    version: '2.0.0-phase2',
-    model: 'gemini-2.5-flash',
+    version: '2.5.0-groq',
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
     status: 'active',
     capabilities: [
-      'Gemini 2.5 Flash Native Function Calling',
+      'Groq Llama-3.3-70B Native Function Calling',
       'Multi-Turn ReAct Cognitive Loop',
       'Spatial Geocoding & Weather Telemetry',
       'GeoJSON Path & Waypoint Generation',
       'Human Oversight Gatekeeper',
     ],
-    tools: agentTools[0].functionDeclarations.map((d) => ({
-      name: d.name,
-      description: d.description,
+    tools: agentTools.map((d) => ({
+      name: d.function?.name || d.name,
+      description: d.function?.description || d.description,
     })),
     humanOversightPolicy: 'Strict approval required before finalizing irreversible spatial writes to database',
   });

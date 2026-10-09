@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import { agentTools } from '../tools/declarations.js';
 import { toolHandlers, buildGeoJSONFeatureCollection } from '../tools/handlers.js';
 import { Route } from '../models/Route.js';
@@ -192,9 +191,41 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
 }
 
 /**
- * Execute Gemini model call with 503 transient error retry and exponential backoff
+ * Execute Groq completions API call using native fetch
  */
-async function callGeminiWithBackoff(callFn, maxRetries = 1) {
+async function callGroqChat({ apiKey, model, messages, tools, temperature = 0.2 }) {
+  const payload = {
+    model,
+    messages,
+    tools,
+    tool_choice: 'auto',
+    temperature,
+  };
+
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'User-Agent': 'GeoQuest-Agent/1.0',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    const err = new Error(`Groq API returned HTTP ${response.status}: ${errorText}`);
+    err.status = response.status;
+    throw err;
+  }
+
+  return await response.json();
+}
+
+/**
+ * Execute Groq model call with transient error retry and exponential backoff
+ */
+async function callGroqWithBackoff(callFn, maxRetries = 1) {
   let attempt = 0;
   while (true) {
     try {
@@ -203,15 +234,18 @@ async function callGeminiWithBackoff(callFn, maxRetries = 1) {
       attempt++;
       const isTransient =
         err.status === 503 ||
-        err.code === 503 ||
+        err.status === 429 ||
+        err.status === 500 ||
+        err.status === 502 ||
         String(err.message || '').includes('503') ||
+        String(err.message || '').includes('429') ||
+        String(err.message || '').includes('rate_limit') ||
         String(err.message || '').includes('UNAVAILABLE') ||
-        String(err.message || '').includes('high demand') ||
-        String(err.message || '').includes('RESOURCE_EXHAUSTED');
+        String(err.message || '').includes('overloaded');
 
       if (isTransient && attempt <= maxRetries) {
         const delayMs = attempt * 1500;
-        console.warn(`⚠️ [GeoQuest Agent] Gemini API hit 503/transient spike (${err.message}). Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
+        console.warn(`⚠️ [GeoQuest Agent] Groq API transient spike (${err.message}). Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
         await new Promise((res) => setTimeout(res, delayMs));
         continue;
       }
@@ -222,7 +256,7 @@ async function callGeminiWithBackoff(callFn, maxRetries = 1) {
 
 /**
  * POST /api/agent/command
- * Autonomous ReAct Cognitive Loop
+ * Autonomous ReAct Cognitive Loop powered by Groq (Llama-3.3-70B)
  * Accepts prompt and userLocation { lat, lng } from request body
  */
 export async function handleAgentCommand(req, res) {
@@ -254,22 +288,22 @@ export async function handleAgentCommand(req, res) {
   let proposedRoute = null;
   let stagedResult = null;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  const isKeyConfigured = apiKey && !apiKey.includes('MY_GEMINI_API_KEY') && apiKey.length > 10;
+  const apiKey = process.env.GROQ_API_KEY;
+  const isKeyConfigured = apiKey && !apiKey.includes('MY_GROQ_API_KEY') && apiKey.length > 10;
 
-  // Primary model target: gemini-3.8-flash for speed, high function calling fidelity, and high quota
-  const primaryModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+  // Primary model target: llama-3.3-70b-versatile on Groq for ultra-fast, robust function calling
+  const primaryModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
   // SYSTEM INSTRUCTION for GeoQuest ReAct Agent
-  let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent.
+  let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent powered by Llama-3.3-70B on Groq.
 Your mission is to interpret user trip commands, reason about spatial constraints, and use function calling tools to assemble an optimal itinerary.
 
 OPERATIONAL PROTOCOL (ReAct Loop):
-1. Thought: Reason about user intent, target destination, theme, and time constraints.
-2. Action: Call 'fetch_weather' to inspect weather at destination.
-3. Action: Call 'search_places' to find relevant, curated spots with exact coordinates [lng, lat].
-4. Action: Call 'calculate_route' to compute transit distance, time, and assemble ordered waypoints.
-5. Action: Call 'propose_itinerary' to package the finalized GeoJSON and request Human Oversight approval.
+1. Reason about user intent, target destination, theme, and time constraints.
+2. Call 'fetch_weather' to inspect weather at destination.
+3. Call 'search_places' to find relevant, curated spots with exact coordinates [lng, lat].
+4. Call 'calculate_route' to compute transit distance, time, and assemble ordered waypoints.
+5. Call 'propose_itinerary' to package the finalized GeoJSON and request Human Oversight approval.
 6. STRICT RULE: Every spatial itinerary write is irreversible and MUST conclude by invoking 'propose_itinerary' to trigger human approval. NEVER fabricate coordinates; always use search_places.`;
 
   if (isNearMe || userCoords) {
@@ -286,32 +320,29 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
       userCoordinates: userCoords,
       thoughts,
       toolCallsMade,
-      reason: 'GEMINI_API_KEY not configured',
+      reason: 'GROQ_API_KEY not configured',
     });
     return res.json(fallbackResponse);
   }
 
-  // --- Real Gemini Function Calling Loop via @google/genai SDK ---
+  // --- Real Groq Function Calling Loop via Native Fetch ---
   try {
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-
-    const contents = [];
+    const messages = [
+      { role: 'system', content: systemInstruction },
+    ];
 
     if (Array.isArray(history) && history.length > 0) {
-      history.forEach((h) => contents.push(h));
+      for (const h of history) {
+        if (h.role && (h.content || h.parts)) {
+          messages.push({
+            role: h.role === 'model' ? 'assistant' : h.role,
+            content: typeof h.content === 'string' ? h.content : (h.parts?.[0]?.text || ''),
+          });
+        }
+      }
     }
 
-    contents.push({
-      role: 'user',
-      parts: [{ text: prompt }],
-    });
+    messages.push({ role: 'user', content: prompt });
 
     const maxIterations = 8;
     let iteration = 0;
@@ -320,53 +351,65 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
     while (iteration < maxIterations) {
       iteration++;
 
-      let response;
+      let completion;
       try {
         // Execute with transient retry and exponential backoff
-        response = await callGeminiWithBackoff(() =>
-          ai.models.generateContent({
+        completion = await callGroqWithBackoff(() =>
+          callGroqChat({
+            apiKey,
             model: primaryModel,
-            contents,
-            config: {
-              systemInstruction,
-              tools: agentTools,
-              temperature: 0.2,
-            },
+            messages,
+            tools: agentTools,
+            temperature: 0.2,
           })
         );
-      } catch (geminiError) {
-        console.warn(`⚠️ [GeoQuest Agent] Gemini call failed after retry (${geminiError.message}). Fallback to resilient ReAct pipeline.`);
+      } catch (groqError) {
+        console.warn(`⚠️ [GeoQuest Agent] Groq call failed after retry (${groqError.message}). Fallback to resilient ReAct pipeline.`);
         const fallbackResponse = await executeDeterministicReAct({
           prompt,
           userCoordinates: userCoords,
           thoughts,
           toolCallsMade,
-          reason: `Gemini API temporary spike (${geminiError.message})`,
+          reason: `Groq API temporary spike (${groqError.message})`,
         });
         return res.json(fallbackResponse);
       }
 
-      if (response.text) {
-        thoughts.push(response.text);
-      }
-
-      const functionCalls = response.functionCalls;
-
-      if (!functionCalls || functionCalls.length === 0) {
-        finalMessage = response.text || 'Planning completed.';
+      const choice = completion.choices?.[0];
+      if (!choice || !choice.message) {
         break;
       }
 
-      const candidateContent = response.candidates?.[0]?.content;
-      if (candidateContent) {
-        contents.push(candidateContent);
+      const assistantMessage = choice.message;
+
+      if (assistantMessage.content) {
+        thoughts.push(assistantMessage.content);
       }
 
-      const functionResponseParts = [];
+      const toolCalls = assistantMessage.tool_calls;
 
-      for (const call of functionCalls) {
-        const toolName = call.name;
-        const toolArgs = { ...(call.args || {}) };
+      if (!toolCalls || toolCalls.length === 0) {
+        finalMessage = assistantMessage.content || 'Planning completed.';
+        break;
+      }
+
+      // Append assistant message with tool calls to conversation history
+      messages.push({
+        role: 'assistant',
+        content: assistantMessage.content || null,
+        tool_calls: assistantMessage.tool_calls,
+      });
+
+      for (const call of toolCalls) {
+        const toolName = call.function.name;
+        let toolArgs = {};
+        try {
+          toolArgs = typeof call.function.arguments === 'string'
+            ? JSON.parse(call.function.arguments)
+            : (call.function.arguments || {});
+        } catch (parseErr) {
+          console.warn(`Failed to parse arguments for tool ${toolName}:`, parseErr);
+        }
 
         // If "near me" prompt or userCoords available, feed userCoordinates directly into search_places and override hardcoded city
         if (toolName === 'search_places') {
@@ -404,19 +447,13 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
           proposedRoute = toolOutput;
         }
 
-        functionResponseParts.push({
-          functionResponse: {
-            name: toolName,
-            response: toolOutput,
-            id: call.id,
-          },
+        // OpenAI/Groq standard tool response message
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: JSON.stringify(toolOutput),
         });
       }
-
-      contents.push({
-        role: 'user',
-        parts: functionResponseParts,
-      });
 
       if (proposedRoute) {
         thoughts.push('Human Oversight Gatekeeper Activated: Staging proposed itinerary for user review.');
@@ -450,7 +487,7 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
       userCoordinates: userCoords,
       thoughts,
       toolCallsMade,
-      reason: error.message,
+      reason: `Groq API temporary spike (${error.message})`,
     });
     return res.json(fallbackResponse);
   }

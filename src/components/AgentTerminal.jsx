@@ -369,7 +369,7 @@ export default function AgentTerminal({
             <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
               GeoQuest ReAct Agent
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800">
-                gemini-3.8-flash
+                llama-3.3-70b-versatile
               </span>
             </h1>
             <p className="text-[11px] text-slate-400">Autonomous Spatial Planning Console</p>
