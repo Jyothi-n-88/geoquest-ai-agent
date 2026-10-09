@@ -257,8 +257,8 @@ export async function handleAgentCommand(req, res) {
   const apiKey = process.env.GEMINI_API_KEY;
   const isKeyConfigured = apiKey && !apiKey.includes('MY_GEMINI_API_KEY') && apiKey.length > 10;
 
-  // Primary model target: gemini-2.5-flash for speed, high function calling fidelity, and high quota
-  const primaryModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  // Primary model target: gemini-3.8-flash for speed, high function calling fidelity, and high quota
+  const primaryModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
   // SYSTEM INSTRUCTION for GeoQuest ReAct Agent
   let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent.

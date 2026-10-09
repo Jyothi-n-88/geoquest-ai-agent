@@ -233,13 +233,13 @@ export async function handleSearchPlaces(args) {
       fullSearchQuery
     )}&format=json&limit=6&addressdetails=1`;
 
-    // If user coordinates available, bias search within proximity viewbox (~25 km window)
+    // If user coordinates available, bias search strictly within proximity viewbox (~25 km window)
     if (userCoords) {
       const [uLng, uLat] = userCoords;
       const boxDelta = 0.25;
       nominatimUrl += `&viewbox=${(uLng - boxDelta).toFixed(4)},${(uLat + boxDelta).toFixed(4)},${(
         uLng + boxDelta
-      ).toFixed(4)},${(uLat - boxDelta).toFixed(4)}`;
+      ).toFixed(4)},${(uLat - boxDelta).toFixed(4)}&bounded=1`;
     }
 
     console.log(`🌐 [Nominatim OSM] Querying: "${fullSearchQuery}" via ${nominatimUrl}`);
