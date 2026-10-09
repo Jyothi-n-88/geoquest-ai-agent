@@ -11,6 +11,7 @@ import {
   AlertCircle,
   Key,
   Check,
+  Loader2,
 } from 'lucide-react';
 
 // Carto Dark high-performance vector-ready raster basemap
@@ -39,10 +40,11 @@ const CARTO_DARK_STYLE = {
   ],
 };
 
-export default function Map({ geojson, activeRoute, onSelectWaypoint }) {
+export default function Map({ geojson, activeRoute, onSelectWaypoint, userLocation }) {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
+  const userMarkerRef = useRef(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState(null);
   const [activeEngine, setActiveEngine] = useState('MapLibre / Carto Dark');
@@ -54,6 +56,9 @@ export default function Map({ geojson, activeRoute, onSelectWaypoint }) {
     !envToken.includes('example') &&
     envToken.length > 25
   );
+
+  // Default fallback center coordinates: Bengaluru [lng: 77.5946, lat: 12.9716]
+  const DEFAULT_BENGALURU_CENTER = [77.5946, 12.9716];
 
   // Initialize Map instance
   useEffect(() => {
@@ -217,24 +222,72 @@ export default function Map({ geojson, activeRoute, onSelectWaypoint }) {
           </div>
         `;
 
-        el.addEventListener('click', () => {
+        el.addEventListener('click', async () => {
+          const resolvedAddress = props.address || props.description || props.formatted_address || props.name || '';
+          const resolvedDesc = props.description || props.address || props.formatted_address || `${props.name || 'Waypoint'} curated stop`;
+
+          // Set immediate selected point state with loading flag for reverse geocoding
           setSelectedPoint({
             ...props,
+            name: name,
+            address: resolvedAddress,
+            description: resolvedDesc,
             coordinates: coords,
             stopNumber: stopNum,
+            isGeocoding: true,
           });
+
           if (onSelectWaypoint) onSelectWaypoint(props);
+
+          // Perform lightweight reverse-geocoding via OpenStreetMap Nominatim
+          try {
+            const [lng, lat] = coords;
+            const res = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`,
+              {
+                headers: {
+                  'Accept': 'application/json',
+                },
+              }
+            );
+
+            if (res.ok) {
+              const data = await res.json();
+              const fullAddress =
+                data.display_name ||
+                [data.address?.road, data.address?.suburb, data.address?.city || data.address?.town, data.address?.state]
+                  .filter(Boolean)
+                  .join(', ') ||
+                resolvedAddress;
+
+              setSelectedPoint((prev) => {
+                if (!prev || prev.stopNumber !== stopNum) return prev;
+                return {
+                  ...prev,
+                  address: fullAddress,
+                  isGeocoding: false,
+                };
+              });
+            } else {
+              setSelectedPoint((prev) => (prev ? { ...prev, isGeocoding: false } : prev));
+            }
+          } catch (err) {
+            console.warn('Reverse geocoding error:', err);
+            setSelectedPoint((prev) => (prev ? { ...prev, isGeocoding: false } : prev));
+          }
         });
 
+        // Ensure hover popup prioritizes description, address, or informative venue context without generic placeholders
+        const locationDetail = props.description || props.address || props.formatted_address || `${name} curated location`;
         const popup = new PopupClass({ offset: 25, closeButton: false }).setHTML(`
-          <div class="p-2 font-sans bg-slate-900 text-slate-100 rounded-lg max-w-[200px]">
-            <div class="flex items-center gap-1.5 mb-1">
-              <span class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 uppercase">
+          <div class="p-2.5 font-sans bg-slate-900/95 text-slate-100 rounded-xl max-w-[220px] border border-slate-800 shadow-xl backdrop-blur-sm">
+            <div class="flex items-center gap-1.5 mb-1.5">
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 uppercase font-semibold">
                 ${category}
               </span>
-              <span class="text-xs font-bold text-white">${name}</span>
+              <span class="text-xs font-bold text-white truncate">${name}</span>
             </div>
-            <p class="text-[11px] text-slate-300 line-clamp-2">${props.description || ''}</p>
+            <p class="text-[11px] text-slate-300 leading-snug line-clamp-3">${locationDetail}</p>
           </div>
         `);
 
@@ -257,20 +310,120 @@ export default function Map({ geojson, activeRoute, onSelectWaypoint }) {
     }
   }, [geojson, mapLoaded, onSelectWaypoint, isCustomTokenValid]);
 
+  // Dynamically pan / flyTo user live coordinates whenever userLocation updates
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded || !userLocation) return;
+
+    const lat = typeof userLocation.lat === 'number' ? userLocation.lat : parseFloat(userLocation.lat);
+    const lng = typeof userLocation.lng === 'number' ? userLocation.lng : parseFloat(userLocation.lng);
+
+    if (isNaN(lat) || isNaN(lng)) return;
+
+    const coords = [lng, lat];
+    console.log(`🗺️ [GeoQuest Map] Dynamically flying to user live coordinates: [${lng}, ${lat}]`);
+
+    // Remove existing user position marker if any
+    if (userMarkerRef.current) {
+      userMarkerRef.current.remove();
+      userMarkerRef.current = null;
+    }
+
+    // Create custom pulsing user location marker
+    const MarkerClass = isCustomTokenValid ? mapboxgl.Marker : maplibregl.Marker;
+    const PopupClass = isCustomTokenValid ? mapboxgl.Popup : maplibregl.Popup;
+
+    const userEl = document.createElement('div');
+    userEl.className = 'relative flex items-center justify-center cursor-pointer';
+    userEl.innerHTML = `
+      <span class="absolute inline-flex h-9 w-9 animate-ping rounded-full bg-cyan-400/40 opacity-75"></span>
+      <span class="relative inline-flex items-center justify-center rounded-full h-7 w-7 bg-cyan-500 text-white font-bold text-[10px] shadow-lg shadow-cyan-500/50 border-2 border-white">
+        📍
+      </span>
+    `;
+
+    const userPopup = new PopupClass({ offset: 20, closeButton: false }).setHTML(`
+      <div class="p-2 font-sans bg-slate-900/95 text-slate-100 rounded-lg border border-cyan-800 text-xs">
+        <div class="font-bold text-cyan-300 flex items-center gap-1">
+          <span>●</span> Live User Location
+        </div>
+        <p class="text-[11px] text-slate-300 font-mono mt-0.5">${lat.toFixed(4)}, ${lng.toFixed(4)}</p>
+      </div>
+    `);
+
+    const userMarker = new MarkerClass({ element: userEl })
+      .setLngLat(coords)
+      .setPopup(userPopup)
+      .addTo(map);
+
+    userMarkerRef.current = userMarker;
+
+    // Only fly to user coordinates if there isn't a fresh multi-point active route overriding the camera,
+    // or fly smoothly to the user location
+    const hasActiveRoutePoints = geojson && geojson.features && geojson.features.length > 0;
+    if (!hasActiveRoutePoints) {
+      map.flyTo({
+        center: coords,
+        zoom: 14,
+        essential: true,
+        duration: 1200,
+      });
+    }
+  }, [userLocation, mapLoaded, isCustomTokenValid]);
+
   const handleRecenter = () => {
-    if (!mapRef.current || !geojson || !geojson.features) return;
-    const LngLatBoundsClass = isCustomTokenValid ? mapboxgl.LngLatBounds : maplibregl.LngLatBounds;
-    const bounds = new LngLatBoundsClass();
-    geojson.features.forEach((f) => {
-      if (f.geometry?.type === 'Point') {
-        bounds.extend(f.geometry.coordinates);
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+
+    // If route features exist, fit the bounds to the route
+    if (geojson && geojson.features && geojson.features.length > 0) {
+      const LngLatBoundsClass = isCustomTokenValid ? mapboxgl.LngLatBounds : maplibregl.LngLatBounds;
+      const bounds = new LngLatBoundsClass();
+      geojson.features.forEach((f) => {
+        if (f.geometry?.type === 'Point') {
+          bounds.extend(f.geometry.coordinates);
+        }
+      });
+      if (!bounds.isEmpty()) {
+        map.fitBounds(bounds, {
+          padding: 60,
+          maxZoom: 15,
+          duration: 800,
+        });
+        return;
       }
-    });
-    if (!bounds.isEmpty()) {
-      mapRef.current.fitBounds(bounds, {
-        padding: 60,
-        maxZoom: 15,
+    }
+
+    // Fallback: Fly to live user coordinates or default Bengaluru
+    if (userLocation && typeof userLocation.lat === 'number' && typeof userLocation.lng === 'number') {
+      map.flyTo({
+        center: [userLocation.lng, userLocation.lat],
+        zoom: 14,
         duration: 800,
+      });
+    } else {
+      map.flyTo({
+        center: DEFAULT_BENGALURU_CENTER,
+        zoom: 12,
+        duration: 800,
+      });
+    }
+  };
+
+  const handleFlyToUser = () => {
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+    if (userLocation && typeof userLocation.lat === 'number' && typeof userLocation.lng === 'number') {
+      map.flyTo({
+        center: [userLocation.lng, userLocation.lat],
+        zoom: 14,
+        duration: 900,
+      });
+    } else {
+      map.flyTo({
+        center: DEFAULT_BENGALURU_CENTER,
+        zoom: 13,
+        duration: 900,
       });
     }
   };
@@ -280,10 +433,21 @@ export default function Map({ geojson, activeRoute, onSelectWaypoint }) {
       {/* Map Canvas */}
       <div ref={mapContainerRef} className="w-full h-full" />
 
-      {/* Engine Status Pill */}
-      <div className="absolute top-4 left-4 z-20 flex items-center gap-2 p-2 rounded-xl bg-slate-900/90 backdrop-blur border border-slate-800 text-xs text-slate-300 shadow-xl">
-        <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
-        <span className="font-mono text-[11px]">{activeEngine}</span>
+      {/* Engine Status Pill & Recenter Buttons */}
+      <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
+        <div className="flex items-center gap-2 p-2 rounded-xl bg-slate-900/90 backdrop-blur border border-slate-800 text-xs text-slate-300 shadow-xl">
+          <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+          <span className="font-mono text-[11px]">{activeEngine}</span>
+        </div>
+
+        <button
+          onClick={handleFlyToUser}
+          title="Recenter Map to Live GPS / Bengaluru"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-cyan-400 hover:text-cyan-300 backdrop-blur border border-slate-800 shadow-xl text-xs font-medium transition"
+        >
+          <Navigation className="h-3.5 w-3.5 fill-cyan-400/20" />
+          <span className="hidden sm:inline">Center My GPS</span>
+        </button>
       </div>
 
       {/* Floating Active Route Card Overlay */}
@@ -351,22 +515,56 @@ export default function Map({ geojson, activeRoute, onSelectWaypoint }) {
 
       {/* Selected Waypoint Modal */}
       {selectedPoint && (
-        <div className="absolute top-4 right-14 z-20 max-w-xs p-3.5 rounded-xl bg-slate-900/95 backdrop-blur border border-slate-700 shadow-xl space-y-1.5 animate-fadeIn">
+        <div className="absolute top-4 right-14 z-20 max-w-xs p-3.5 rounded-xl bg-slate-900/95 backdrop-blur border border-slate-700 shadow-xl space-y-2 animate-fadeIn">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-bold uppercase">
               Stop #{selectedPoint.stopNumber}
             </span>
             <button
               onClick={() => setSelectedPoint(null)}
-              className="text-slate-400 hover:text-white text-xs font-bold px-1"
+              className="text-slate-400 hover:text-white text-xs font-bold px-1 transition"
+              aria-label="Close details"
             >
               ✕
             </button>
           </div>
-          <div className="font-bold text-sm text-white">{selectedPoint.name}</div>
-          <p className="text-xs text-slate-300 leading-relaxed">{selectedPoint.description}</p>
-          <div className="text-[10px] font-mono text-cyan-400 pt-1">
-            Coords: [{selectedPoint.coordinates[0]?.toFixed(4)}, {selectedPoint.coordinates[1]?.toFixed(4)}]
+          <div>
+            <div className="font-bold text-sm text-white">{selectedPoint.name}</div>
+            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+              <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-cyan-950/60 text-cyan-300 border border-cyan-800/80 inline-block">
+                {selectedPoint.category || 'landmark'}
+              </span>
+              {selectedPoint.distanceFromUserKm !== null && selectedPoint.distanceFromUserKm !== undefined && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/80 inline-block">
+                  📍 {selectedPoint.distanceFromUserKm} km away
+                </span>
+              )}
+            </div>
+          </div>
+          {selectedPoint.description && (
+            <p className="text-xs text-slate-300 leading-relaxed line-clamp-3">
+              {selectedPoint.description}
+            </p>
+          )}
+          {/* Human-Readable Address / Real Street Location */}
+          <div className="flex items-start gap-1.5 pt-1.5 border-t border-slate-800 text-[11px] text-slate-300">
+            {selectedPoint.isGeocoding ? (
+              <Loader2 className="h-3.5 w-3.5 text-cyan-400 shrink-0 mt-0.5 animate-spin" />
+            ) : (
+              <MapPin className="h-3.5 w-3.5 text-cyan-400 shrink-0 mt-0.5" />
+            )}
+            <div className="flex-1">
+              <span className="line-clamp-3 leading-tight block text-slate-200 font-normal">
+                {selectedPoint.isGeocoding && !selectedPoint.address ? (
+                  <span className="text-cyan-400/80 italic font-mono text-[10px]">Resolving street address...</span>
+                ) : (
+                  selectedPoint.address || selectedPoint.description || selectedPoint.formatted_address || `${selectedPoint.name} location`
+                )}
+              </span>
+              {selectedPoint.isGeocoding && selectedPoint.address && (
+                <span className="text-[9px] text-cyan-400/70 block mt-0.5 font-mono">Verifying precise street...</span>
+              )}
+            </div>
           </div>
         </div>
       )}

@@ -29,6 +29,7 @@ export default function AgentTerminal({
   activeRoute,
   onRouteGenerated,
   onRouteApproved,
+  onLocationChange,
 }) {
   const [prompt, setPrompt] = useState(
     'Find Shiva temples spots near me'
@@ -46,14 +47,18 @@ export default function AgentTerminal({
   const [speechToast, setSpeechToast] = useState(null); // { message, type: 'error' | 'info' }
   const recognitionRef = useRef(null);
 
-  // Browser Geolocation ("Near Me") State
-  const [userLocation, setUserLocation] = useState(null); // { lat, lng }
+  // Default fallback coordinates: Bengaluru [lat: 12.9716, lng: 77.5946] (replaces legacy Dubai [25.1416, 55.2057] defaults)
+  const BENGALURU_DEFAULT_COORDS = { lat: 12.9716, lng: 77.5946 };
+
+  // Browser Geolocation ("Near Me") State - Initialized to Bengaluru default [12.9716, 77.5946]
+  const [userLocation, setUserLocation] = useState(BENGALURU_DEFAULT_COORDS); // { lat, lng }
   const [geoStatus, setGeoStatus] = useState('detecting'); // 'detecting' | 'detected' | 'denied' | 'unsupported'
 
   // Capture user coordinates on mount or refresh
   const detectUserLocation = (showToastNotice = false) => {
     if (!('geolocation' in navigator)) {
-      console.warn('⚠️ [GeoQuest GPS] Geolocation API not supported in this browser.');
+      console.warn('⚠️ [GeoQuest GPS] Geolocation API not supported in this browser. Defaulting to Bengaluru [12.9716, 77.5946].');
+      setUserLocation(BENGALURU_DEFAULT_COORDS);
       setGeoStatus('unsupported');
       return;
     }
@@ -69,6 +74,9 @@ export default function AgentTerminal({
         };
         setUserLocation(coords);
         setGeoStatus('detected');
+        if (typeof onLocationChange === 'function') {
+          onLocationChange(coords);
+        }
         console.log(`📍 [GeoQuest GPS] Detected live coordinates: lat=${coords.lat}, lng=${coords.lng}`);
         if (showToastNotice) {
           setSpeechToast({
@@ -79,11 +87,12 @@ export default function AgentTerminal({
       },
       (error) => {
         console.warn('⚠️ [GeoQuest GPS] Geolocation capture failed or denied:', error.message);
+        setUserLocation(BENGALURU_DEFAULT_COORDS);
         setGeoStatus('denied');
         if (showToastNotice) {
           setSpeechToast({
             type: 'info',
-            message: '⚠️ Location permission denied. The agent will use city default coordinates.',
+            message: '⚠️ Location permission denied. Defaulting to Bengaluru [12.9716, 77.5946].',
           });
         }
       },
@@ -213,10 +222,10 @@ export default function AgentTerminal({
   };
 
   const samplePrompts = [
-    'Find Shiva temples spots near me',
-    'Find specialty artisan cafes and scenic spots near me',
-    'Plan a 1-day heritage and cafe crawl in Bengaluru with 3 curated spots',
-    'Find coastal heritage sights and specialty coffee in Mumbai',
+    { label: 'Shiva Temples Near Me', query: 'Find Shiva temples spots near me' },
+    { label: 'Artisan Cafes & Scenic Spots', query: 'Find specialty artisan cafes and scenic spots near me' },
+    { label: '1-Day Bengaluru Crawl', query: 'Plan a 1-day heritage and cafe crawl in Bengaluru with 3 curated spots' },
+    { label: 'Mumbai Coastal & Coffee', query: 'Find coastal heritage sights and specialty coffee in Mumbai' },
   ];
 
   /**
@@ -245,13 +254,19 @@ export default function AgentTerminal({
     setApprovalStatus(null);
     setSpeechToast(null);
 
+    // Default Bengaluru fallback coordinates [12.9716, 77.5946] as required by specifications
+    const BENGALURU_FALLBACK = { lat: 12.9716, lng: 77.5946 };
+
     // Inner sender function that performs the POST /api/agent/command fetch
     const sendCommand = async (userLocationCoords) => {
-      const payload = userLocationCoords
-        ? { prompt: textToRun, userLocation: userLocationCoords }
-        : { prompt: textToRun };
+      // Ensure payload explicitly transmits the live coordinates; if none detected, fall back to Bengaluru [12.9716, 77.5946]
+      const finalCoords = userLocationCoords || userLocation || BENGALURU_FALLBACK;
+      const payload = {
+        prompt: textToRun,
+        userLocation: finalCoords,
+      };
 
-      console.log('🚀 [GeoQuest Command] Sending request to POST /api/agent/command:', payload);
+      console.log('🚀 [GeoQuest Command] Sending request to POST /api/agent/command with live coordinates:', payload);
 
       try {
         const res = await fetch('/api/agent/command', {
@@ -284,10 +299,16 @@ export default function AgentTerminal({
       }
     };
 
+    // If live browser location is already in state, send immediately while refreshing in background
+    if (userLocation && geoStatus === 'detected') {
+      sendCommand(userLocation);
+      return;
+    }
+
     // Check if navigator.geolocation is available in browser
     if ('geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
-        // Success callback: extract coordinates and send userLocation payload
+        // Success callback: extract live GPS coordinates and send userLocation payload
         (position) => {
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
@@ -297,24 +318,32 @@ export default function AgentTerminal({
           };
           setUserLocation(coords);
           setGeoStatus('detected');
-          sendCommand({ lat, lng });
+          sendCommand(coords);
         },
-        // Error callback: user denied permissions or timeout; gracefully fall back
+        // Error callback: user denied permissions or timeout; notify user & fall back to Bengaluru [12.9716, 77.5946]
         (error) => {
           console.warn('⚠️ [GeoQuest GPS] Geolocation permission denied or failed:', error.message);
           setGeoStatus('denied');
-          sendCommand(null);
+          setSpeechToast({
+            type: 'error',
+            message: '⚠️ Location permission denied or timed out. Defaulting to Bengaluru [12.9716, 77.5946].',
+          });
+          sendCommand(BENGALURU_FALLBACK);
         },
         {
           enableHighAccuracy: true,
-          timeout: 6000,
-          maximumAge: 60000,
+          timeout: 7000,
+          maximumAge: 30000,
         }
       );
     } else {
-      // Browser does not support geolocation; send prompt only
+      // Browser does not support geolocation; inform user and fall back to Bengaluru [12.9716, 77.5946]
       setGeoStatus('unsupported');
-      sendCommand(null);
+      setSpeechToast({
+        type: 'error',
+        message: '⚠️ Geolocation not supported by browser. Defaulting to Bengaluru [12.9716, 77.5946].',
+      });
+      sendCommand(BENGALURU_FALLBACK);
     }
   };
 
@@ -360,18 +389,21 @@ export default function AgentTerminal({
   return (
     <div className="flex flex-col h-full bg-slate-950 border-r border-slate-800 text-slate-100 font-sans">
       {/* Terminal Title Bar */}
-      <div className="p-4 border-b border-slate-800 bg-slate-900/80 backdrop-blur flex items-center justify-between">
+      <div className="p-3.5 border-b border-slate-800 bg-slate-900/90 backdrop-blur flex items-center justify-between">
         <div className="flex items-center gap-2.5">
-          <div className="h-7 w-7 rounded-lg bg-cyan-950 border border-cyan-700/60 flex items-center justify-center text-cyan-400">
+          <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-amber-500/20 to-orange-600/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-sm">
             <Terminal className="h-4 w-4" />
           </div>
           <div>
-            <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
-              GeoQuest ReAct Agent
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800">
+            <div className="flex items-center gap-2">
+              <h1 className="text-sm font-bold text-white tracking-tight">
+                GeoQuest Agent
+              </h1>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-700/60 font-semibold flex items-center gap-1 shadow-sm">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
                 llama-3.3-70b-versatile
               </span>
-            </h1>
+            </div>
             <p className="text-[11px] text-slate-400">Autonomous Spatial Planning Console</p>
           </div>
         </div>
@@ -383,9 +415,9 @@ export default function AgentTerminal({
               <span>Listening...</span>
             </div>
           )}
-          <div className="flex items-center gap-1.5 text-[11px] font-mono text-emerald-400">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Active</span>
+          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-950/50 border border-emerald-800/60 text-[11px] font-mono text-emerald-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span>Ready</span>
           </div>
         </div>
       </div>
@@ -417,41 +449,58 @@ export default function AgentTerminal({
       )}
 
       {/* Scrollable Feed */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {/* Quick Sample Prompts */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
+        {/* Streamlined Suggested Prompts as Compact Pill-Chips */}
         <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-2">
-          <span className="text-[11px] font-medium text-slate-400 flex items-center gap-1">
-            <Sparkles className="h-3 w-3 text-cyan-400" />
-            Suggested Spatial Commands:
-          </span>
-          <div className="flex flex-col gap-1.5">
-            {samplePrompts.map((p, idx) => (
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
+              <Sparkles className="h-3 w-3 text-amber-400" />
+              Suggested Spatial Commands:
+            </span>
+            <span className="text-[10px] text-slate-500 font-mono">click to execute</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {samplePrompts.map((item, idx) => (
               <button
                 key={idx}
                 onClick={() => {
-                  setPrompt(p);
-                  handleExecute(p);
+                  setPrompt(item.query);
+                  handleExecute(item.query);
                 }}
                 disabled={loading}
-                className="text-left text-xs p-2 rounded-lg bg-slate-950 hover:bg-slate-800/80 text-slate-300 border border-slate-800 hover:border-slate-700 transition flex items-center justify-between group"
+                title={item.query}
+                className="group inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-950/90 hover:bg-slate-800/90 border border-slate-800 hover:border-cyan-500/60 text-[11px] text-slate-300 hover:text-white transition shadow-sm active:scale-95 disabled:opacity-40"
               >
-                <span className="line-clamp-1">{p}</span>
-                <ArrowRight className="h-3 w-3 text-slate-500 group-hover:text-cyan-400 shrink-0 ml-2" />
+                <Compass className="h-3 w-3 text-cyan-400 group-hover:rotate-45 transition-transform shrink-0" />
+                <span className="truncate max-w-[200px]">{item.label}</span>
               </button>
             ))}
           </div>
         </div>
 
+        {/* Loading State Banner */}
+        {loading && (
+          <div className="p-3.5 rounded-xl bg-slate-900/90 border border-cyan-500/40 flex items-center gap-3 animate-pulse shadow-lg shadow-cyan-500/5">
+            <RefreshCw className="h-4 w-4 text-cyan-400 animate-spin shrink-0" />
+            <div className="space-y-0.5">
+              <p className="text-xs font-semibold text-white">ReAct Agent Planning Route...</p>
+              <p className="text-[10px] text-slate-400 font-mono">
+                Executing spatial functions (places, routes) & assembling GeoJSON
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Human Oversight Gatekeeper Banner & Approval Buttons */}
         {agentResponse?.proposedRoute && (
-          <div className="p-4 rounded-xl bg-gradient-to-b from-slate-900 to-slate-950 border-2 border-amber-500/60 space-y-3.5 shadow-xl">
+          <div className="p-4 rounded-xl bg-gradient-to-b from-slate-900 to-slate-950 border border-amber-500/60 space-y-3 shadow-xl ring-1 ring-amber-500/20">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
                 <ShieldCheck className="h-4 w-4" />
                 Human Oversight Gatekeeper
               </span>
               <span
-                className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded font-bold ${
+                className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-full font-bold ${
                   approvalStatus === 'approved'
                     ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
                     : approvalStatus === 'rejected'
@@ -463,14 +512,22 @@ export default function AgentTerminal({
               </span>
             </div>
 
-            <p className="text-xs text-slate-300 leading-relaxed">
-              The agent constructed an itinerary (<span className="font-semibold text-white">{agentResponse.proposedRoute.title}</span>)
-              spanning {agentResponse.proposedRoute.totalDistanceKm} km across {agentResponse.proposedRoute.locations?.length || 0} stops.
-              Confirm to persist to MongoDB Atlas.
-            </p>
+            <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-white truncate max-w-[220px]">
+                  {agentResponse.proposedRoute.title}
+                </span>
+                <span className="text-[10px] font-mono text-cyan-400 shrink-0">
+                  {agentResponse.proposedRoute.totalDistanceKm} km
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-snug">
+                {agentResponse.proposedRoute.locations?.length || 0} curated stops mapped. Confirm to persist to MongoDB Atlas.
+              </p>
+            </div>
 
-            <div className="space-y-1.5">
-              <label className="text-[11px] text-slate-400">Approval Notes:</label>
+            <div className="space-y-1">
+              <label className="text-[10px] text-slate-400 font-mono uppercase">Approval Notes / Audit Log:</label>
               <input
                 type="text"
                 value={approvalNotes}
@@ -479,7 +536,7 @@ export default function AgentTerminal({
               />
             </div>
 
-            <div className="flex items-center gap-2 pt-1">
+            <div className="flex items-center gap-2 pt-0.5">
               <button
                 onClick={() => handleApprovalAction('reject')}
                 disabled={approvalLoading || approvalStatus === 'rejected'}
@@ -500,76 +557,105 @@ export default function AgentTerminal({
           </div>
         )}
 
-        {/* Cognitive Thoughts Log */}
-        {agentResponse?.thoughts?.length > 0 && (
-          <div className="space-y-2">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
-              <Cpu className="h-3.5 w-3.5" />
-              Agent Thoughts & Reasoning ({agentResponse.thoughts.length})
-            </span>
-            <div className="space-y-1.5">
-              {agentResponse.thoughts.map((thought, i) => (
-                <div
-                  key={i}
-                  className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300 font-mono leading-relaxed"
-                >
-                  {thought}
+        {/* Collapsible ReAct Debug Inspector (Thoughts & Tool Trace) */}
+        {(agentResponse?.thoughts?.length > 0 || agentResponse?.toolCallsMade?.length > 0) && (
+          <details className="group rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden text-xs transition shadow-md">
+            <summary className="p-3 cursor-pointer select-none flex items-center justify-between hover:bg-slate-800/40 transition list-none">
+              <div className="flex items-center gap-2">
+                <div className="h-6 w-6 rounded-md bg-purple-950/80 border border-purple-700/50 flex items-center justify-center text-purple-400">
+                  <Activity className="h-3.5 w-3.5" />
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
+                <div>
+                  <span className="font-semibold text-slate-200 block text-xs">
+                    ReAct Reasoning & Tool Inspector
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    {agentResponse.thoughts?.length || 0} thoughts • {agentResponse.toolCallsMade?.length || 0} tool calls
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 text-slate-400 group-open:text-purple-400 transition">
+                <span className="text-[10px] font-mono group-open:hidden">Inspect</span>
+                <span className="text-[10px] font-mono hidden group-open:inline">Hide</span>
+                <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
+              </div>
+            </summary>
 
-        {/* Tool Calls Visualizer */}
-        {agentResponse?.toolCallsMade?.length > 0 && (
-          <div className="space-y-2">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
-              <Activity className="h-3.5 w-3.5" />
-              Tool Execution Trace ({agentResponse.toolCallsMade.length})
-            </span>
-            <div className="space-y-2">
-              {agentResponse.toolCallsMade.map((call, idx) => {
-                const isExpanded = expandedTools[idx];
-                return (
-                  <div
-                    key={idx}
-                    className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden text-xs"
-                  >
-                    <button
-                      onClick={() => toggleToolExpand(idx)}
-                      className="w-full p-2.5 flex items-center justify-between text-left hover:bg-slate-800/50 transition"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-                        <span className="font-mono font-semibold text-white">{call.tool}</span>
+            <div className="p-3 border-t border-slate-800/80 bg-slate-950/70 space-y-3.5">
+              {/* Cognitive Thoughts Log */}
+              {agentResponse?.thoughts?.length > 0 && (
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-cyan-400 flex items-center gap-1.5 font-semibold">
+                    <Cpu className="h-3 w-3" />
+                    Agent Thoughts & Reasoning ({agentResponse.thoughts.length})
+                  </span>
+                  <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+                    {agentResponse.thoughts.map((thought, i) => (
+                      <div
+                        key={i}
+                        className="p-2 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300 font-mono leading-relaxed"
+                      >
+                        {thought}
                       </div>
-                      <div className="flex items-center gap-2 text-slate-400 text-[11px]">
-                        <span>Step {idx + 1}</span>
-                        {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                      </div>
-                    </button>
-
-                    {isExpanded && (
-                      <div className="p-3 border-t border-slate-800/80 bg-slate-950 space-y-2 font-mono text-[11px]">
-                        <div>
-                          <span className="text-slate-500 uppercase text-[10px] block mb-0.5">Parameters:</span>
-                          <pre className="p-2 rounded bg-slate-900 text-cyan-300 overflow-x-auto">
-                            {JSON.stringify(call.args, null, 2)}
-                          </pre>
-                        </div>
-                        <div>
-                          <span className="text-slate-500 uppercase text-[10px] block mb-0.5">Result:</span>
-                          <pre className="p-2 rounded bg-slate-900 text-emerald-300 overflow-x-auto max-h-36">
-                            {JSON.stringify(call.output, null, 2)}
-                          </pre>
-                        </div>
-                      </div>
-                    )}
+                    ))}
                   </div>
-                );
-              })}
+                </div>
+              )}
+
+              {/* Tool Calls Visualizer */}
+              {agentResponse?.toolCallsMade?.length > 0 && (
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-purple-400 flex items-center gap-1.5 font-semibold">
+                    <Activity className="h-3 w-3" />
+                    Tool Execution Trace ({agentResponse.toolCallsMade.length})
+                  </span>
+                  <div className="space-y-1.5">
+                    {agentResponse.toolCallsMade.map((call, idx) => {
+                      const isExpanded = expandedTools[idx];
+                      return (
+                        <div
+                          key={idx}
+                          className="rounded-lg bg-slate-900 border border-slate-800 overflow-hidden text-xs"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleToolExpand(idx)}
+                            className="w-full p-2 flex items-center justify-between text-left hover:bg-slate-800/50 transition"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                              <span className="font-mono font-semibold text-white text-[11px]">{call.tool}</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-slate-400 text-[10px] font-mono">
+                              <span>Step {idx + 1}</span>
+                              {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                            </div>
+                          </button>
+
+                          {isExpanded && (
+                            <div className="p-2.5 border-t border-slate-800/80 bg-slate-950 space-y-2 font-mono text-[10px]">
+                              <div>
+                                <span className="text-slate-500 uppercase text-[9px] block mb-0.5">Parameters:</span>
+                                <pre className="p-2 rounded bg-slate-900 text-cyan-300 overflow-x-auto max-h-32">
+                                  {JSON.stringify(call.args, null, 2)}
+                                </pre>
+                              </div>
+                              <div>
+                                <span className="text-slate-500 uppercase text-[9px] block mb-0.5">Result:</span>
+                                <pre className="p-2 rounded bg-slate-900 text-emerald-300 overflow-x-auto max-h-32">
+                                  {JSON.stringify(call.output, null, 2)}
+                                </pre>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
+          </details>
         )}
       </div>
 
@@ -593,24 +679,25 @@ export default function AgentTerminal({
             />
             <span className="font-medium">
               {geoStatus === 'detected' && userLocation
-                ? `📍 Location: Detected (${userLocation.lat}, ${userLocation.lng})`
+                ? `📍 GPS: Live (${userLocation.lat}, ${userLocation.lng})`
                 : geoStatus === 'detecting'
-                ? '📍 Location: Detecting GPS...'
-                : '📍 Location: City Default'}
+                ? '📍 GPS: Detecting coordinates...'
+                : '📍 GPS: Bengaluru Fallback [12.9716, 77.5946]'}
             </span>
             <span className="text-[10px] text-slate-500 group-hover:text-slate-400 underline ml-1">
-              {geoStatus === 'detected' ? '(Refresh)' : '(Click to Detect)'}
+              {geoStatus === 'detected' ? '(Refresh GPS)' : '(Detect Live GPS)'}
             </span>
           </button>
 
           {geoStatus === 'detected' && userLocation ? (
             <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              GPS Ready for "Near Me"
+              Live GPS Active
             </span>
           ) : (
-            <span className="text-[10px] text-slate-500">
-              Using Fallback Center
+            <span className="text-[10px] text-amber-400/90 font-mono flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              Bengaluru Center
             </span>
           )}
         </div>

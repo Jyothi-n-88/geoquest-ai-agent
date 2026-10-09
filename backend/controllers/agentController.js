@@ -103,17 +103,26 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
       : `Spatial ReAct Goal: Discovering "${dynamicQuery}" in ${targetCity}.`
   );
 
-  // 1. Fetch Weather
-  const weatherRes = await toolHandlers.fetch_weather({
-    city: isNearMe ? 'Current Location' : targetCity,
-  });
-  toolCallsMade.push({
-    tool: 'fetch_weather',
-    args: { city: isNearMe ? 'Current Location' : targetCity },
-    output: weatherRes,
-    id: `call_${Date.now()}_1`,
-  });
-  thoughts.push(`Observed Weather: ${weatherRes.condition}, ${weatherRes.temperatureC}°C (${weatherRes.recommendation})`);
+  // Check if prompt specifically asks about weather
+  const userAskedForWeather = /\b(weather|rain|temperature|forecast|sunny|cloudy|umbrella|climate)\b/i.test(prompt);
+
+  // 1. Fetch Weather (OPTIONAL: only if user explicitly asks for weather)
+  let weatherNote = 'Weather check not requested';
+  if (userAskedForWeather) {
+    const weatherRes = await toolHandlers.fetch_weather({
+      city: isNearMe ? 'Current Location' : targetCity,
+    });
+    toolCallsMade.push({
+      tool: 'fetch_weather',
+      args: { city: isNearMe ? 'Current Location' : targetCity },
+      output: weatherRes,
+      id: `call_${Date.now()}_1`,
+    });
+    thoughts.push(`Observed Weather: ${weatherRes.condition}, ${weatherRes.temperatureC}°C (${weatherRes.recommendation})`);
+    weatherNote = `${weatherRes.condition}, ${weatherRes.temperatureC}°C. ${weatherRes.recommendation}`;
+  } else {
+    thoughts.push('Skipping weather check (weather not explicitly requested by user).');
+  }
 
   // 2. Search Places - Dynamic live search via OpenStreetMap Nominatim with real userLocation
   const placesRes = await toolHandlers.search_places({
@@ -160,7 +169,7 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
     locations: selectedPlaces,
     totalDistanceKm: routeRes.totalDistanceKm,
     estimatedDurationMinutes: routeRes.estimatedDurationMinutes,
-    weatherNote: `${weatherRes.condition}, ${weatherRes.temperatureC}°C.`,
+    weatherNote,
     agentReasoning: isNearMe
       ? `Curated an optimized exploration sequence for "${dynamicQuery}" around your active coordinates.`
       : `Organized an optimal trail from ${selectedPlaces[0]?.name || 'start'} to ${selectedPlaces[selectedPlaces.length - 1]?.name || 'finish'}.`,
@@ -214,8 +223,19 @@ async function callGroqChat({ apiKey, model, messages, tools, temperature = 0.2 
 
   if (!response.ok) {
     const errorText = await response.text();
+    let retryAfterSeconds = null;
+    const retryHeader = response.headers.get('retry-after');
+    if (retryHeader) {
+      retryAfterSeconds = parseFloat(retryHeader);
+    }
+    const match = errorText.match(/try again in ([0-9.]+)s/i);
+    if (match && match[1]) {
+      retryAfterSeconds = parseFloat(match[1]);
+    }
+
     const err = new Error(`Groq API returned HTTP ${response.status}: ${errorText}`);
     err.status = response.status;
+    err.retryAfter = retryAfterSeconds;
     throw err;
   }
 
@@ -225,7 +245,7 @@ async function callGroqChat({ apiKey, model, messages, tools, temperature = 0.2 
 /**
  * Execute Groq model call with transient error retry and exponential backoff
  */
-async function callGroqWithBackoff(callFn, maxRetries = 1) {
+async function callGroqWithBackoff(callFn, maxRetries = 2) {
   let attempt = 0;
   while (true) {
     try {
@@ -243,9 +263,14 @@ async function callGroqWithBackoff(callFn, maxRetries = 1) {
         String(err.message || '').includes('UNAVAILABLE') ||
         String(err.message || '').includes('overloaded');
 
-      if (isTransient && attempt <= maxRetries) {
-        const delayMs = attempt * 1500;
-        console.warn(`⚠️ [GeoQuest Agent] Groq API transient spike (${err.message}). Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
+      const waitMatch = String(err.message || '').match(/try again in ([0-9.]+)s/i);
+      const suggestedWait = err.retryAfter || (waitMatch ? parseFloat(waitMatch[1]) : null);
+
+      if (isTransient && attempt <= maxRetries && (!suggestedWait || suggestedWait <= 4.0)) {
+        const delayMs = suggestedWait
+          ? Math.ceil(suggestedWait * 1000) + 700
+          : Math.max(attempt * 2000, 2000);
+        console.warn(`⚠️ [GeoQuest Agent] Groq API transient rate limit. Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
         await new Promise((res) => setTimeout(res, delayMs));
         continue;
       }
@@ -291,24 +316,27 @@ export async function handleAgentCommand(req, res) {
   const apiKey = process.env.GROQ_API_KEY;
   const isKeyConfigured = apiKey && !apiKey.includes('MY_GROQ_API_KEY') && apiKey.length > 10;
 
-  // Primary model target: llama-3.3-70b-versatile on Groq for ultra-fast, robust function calling
-  const primaryModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  // Primary model target: configured GROQ_MODEL or openai/gpt-oss-120b
+  const primaryModel = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+  // Available models to fall back on if primary model hits TPM limit
+  const fallbackModels = ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b'].filter((m) => m !== primaryModel);
 
   // SYSTEM INSTRUCTION for GeoQuest ReAct Agent
-  let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent powered by Llama-3.3-70B on Groq.
+  let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent powered by Groq.
 Your mission is to interpret user trip commands, reason about spatial constraints, and use function calling tools to assemble an optimal itinerary.
 
 OPERATIONAL PROTOCOL (ReAct Loop):
 1. Reason about user intent, target destination, theme, and time constraints.
-2. Call 'fetch_weather' to inspect weather at destination.
+2. OPTIONAL: Call 'fetch_weather' ONLY IF the user explicitly asks about weather, rain, temperature, or requests a weather-perfect day. If not mentioned, skip this step entirely.
 3. Call 'search_places' to find relevant, curated spots with exact coordinates [lng, lat].
 4. Call 'calculate_route' to compute transit distance, time, and assemble ordered waypoints.
-5. Call 'propose_itinerary' to package the finalized GeoJSON and request Human Oversight approval.
-6. STRICT RULE: Every spatial itinerary write is irreversible and MUST conclude by invoking 'propose_itinerary' to trigger human approval. NEVER fabricate coordinates; always use search_places.`;
+5. Call 'propose_itinerary' to package the finalized GeoJSON and request Human Oversight approval. (If you skipped the weather check, simply pass "Weather check not requested" for the weatherNote parameter).
+6. STRICT RULE: Every spatial itinerary write is irreversible and MUST conclude by invoking 'propose_itinerary' to trigger human approval. NEVER fabricate coordinates; always use search_places.
+7. TOOL ARGS: Omit optional parameters if not available rather than passing null values.`;
 
   if (isNearMe || userCoords) {
     const coordsToUse = userCoords || [77.5946, 12.9716];
-    systemInstruction += `\n7. PROXIMITY & "NEAR ME" DIRECTIVE: The user's active coordinates are [longitude: ${coordsToUse[0]}, latitude: ${coordsToUse[1]}].
+    systemInstruction += `\n8. PROXIMITY & "NEAR ME" DIRECTIVE: The user's active coordinates are [longitude: ${coordsToUse[0]}, latitude: ${coordsToUse[1]}].
 The user prompt asks for spots 'near me', 'nearby', or 'around here'.
 You MUST pass userCoordinates: [${coordsToUse[0]}, ${coordsToUse[1]}] to 'search_places' and leave the 'city' parameter blank so the system discovers venues situated directly around their live coordinates via OpenStreetMap instead of searching a hardcoded city center.
 Then pass those discovered proximity waypoints into 'calculate_route' and 'propose_itinerary'.`;
@@ -332,7 +360,8 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
     ];
 
     if (Array.isArray(history) && history.length > 0) {
-      for (const h of history) {
+      const recentHistory = history.slice(-4);
+      for (const h of recentHistory) {
         if (h.role && (h.content || h.parts)) {
           messages.push({
             role: h.role === 'model' ? 'assistant' : h.role,
@@ -347,6 +376,7 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
     const maxIterations = 8;
     let iteration = 0;
     let finalMessage = '';
+    let currentModel = primaryModel;
 
     while (iteration < maxIterations) {
       iteration++;
@@ -357,22 +387,50 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
         completion = await callGroqWithBackoff(() =>
           callGroqChat({
             apiKey,
-            model: primaryModel,
+            model: currentModel,
             messages,
             tools: agentTools,
             temperature: 0.2,
           })
         );
       } catch (groqError) {
-        console.warn(`⚠️ [GeoQuest Agent] Groq call failed after retry (${groqError.message}). Fallback to resilient ReAct pipeline.`);
-        const fallbackResponse = await executeDeterministicReAct({
-          prompt,
-          userCoordinates: userCoords,
-          thoughts,
-          toolCallsMade,
-          reason: `Groq API temporary spike (${groqError.message})`,
-        });
-        return res.json(fallbackResponse);
+        const isRateLimit = groqError.status === 429 || String(groqError.message || '').includes('429');
+        let fallbackSucceeded = false;
+
+        // If rate limited, attempt fallback models before failing to deterministic
+        if (isRateLimit && fallbackModels.length > 0) {
+          for (const altModel of fallbackModels) {
+            try {
+              console.warn(`⚠️ [GeoQuest Agent] Model ${currentModel} rate limited. Switching to ${altModel}...`);
+              currentModel = altModel;
+              completion = await callGroqWithBackoff(() =>
+                callGroqChat({
+                  apiKey,
+                  model: currentModel,
+                  messages,
+                  tools: agentTools,
+                  temperature: 0.2,
+                })
+              );
+              fallbackSucceeded = true;
+              break;
+            } catch (altErr) {
+              console.warn(`⚠️ [GeoQuest Agent] Fallback model ${altModel} failed:`, altErr.message);
+            }
+          }
+        }
+
+        if (!fallbackSucceeded) {
+          console.warn(`⚠️ [GeoQuest Agent] Groq call failed after retry (${groqError.message}). Fallback to resilient ReAct pipeline.`);
+          const fallbackResponse = await executeDeterministicReAct({
+            prompt,
+            userCoordinates: userCoords,
+            thoughts,
+            toolCallsMade,
+            reason: `Groq API temporary spike (${groqError.message})`,
+          });
+          return res.json(fallbackResponse);
+        }
       }
 
       const choice = completion.choices?.[0];
@@ -409,6 +467,15 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
             : (call.function.arguments || {});
         } catch (parseErr) {
           console.warn(`Failed to parse arguments for tool ${toolName}:`, parseErr);
+        }
+
+        // Clean out any null fields from toolArgs so handlers receive clean input
+        if (toolArgs && typeof toolArgs === 'object') {
+          for (const key of Object.keys(toolArgs)) {
+            if (toolArgs[key] === null) {
+              delete toolArgs[key];
+            }
+          }
         }
 
         // If "near me" prompt or userCoords available, feed userCoordinates directly into search_places and override hardcoded city

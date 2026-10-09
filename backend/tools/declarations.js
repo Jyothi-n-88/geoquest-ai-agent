@@ -1,22 +1,22 @@
 /**
  * Tool 1: fetch_weather
- * Fetch current weather, precipitation, and conditions for a destination.
+ * Fetch current weather conditions for a destination.
  */
 export const fetchWeatherDeclaration = {
   type: 'function',
   function: {
     name: 'fetch_weather',
-    description: 'Fetch current weather conditions, temperature, precipitation, and forecast recommendations for a target city or destination.',
+    description: 'Fetch current weather and temperature for a city.',
     parameters: {
       type: 'object',
       properties: {
         city: {
           type: 'string',
-          description: 'The city or destination name (e.g., "Bengaluru", "Mumbai", "Delhi", "San Francisco").',
+          description: 'The city or destination name.',
         },
         date: {
-          type: 'string',
-          description: 'Optional date for forecasted weather (format: YYYY-MM-DD or "today").',
+          anyOf: [{ type: 'string' }, { type: 'null' }],
+          description: 'Optional date for weather (YYYY-MM-DD or today).',
         },
       },
       required: ['city'],
@@ -32,36 +32,39 @@ export const searchPlacesDeclaration = {
   type: 'function',
   function: {
     name: 'search_places',
-    description: 'Search for curated points of interest, attractions, cafes, or landmarks with precise geospatial coordinates [lng, lat], category, and descriptions.',
+    description: 'Search points of interest or landmarks with coordinates [lng, lat].',
     parameters: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Search query for the place or type of activity (e.g., "botanical garden", "specialty coffee", "historic fort").',
+          description: 'Search query for spots or activities (e.g. cafes, historic fort).',
         },
         category: {
-          type: 'string',
-          description: 'Category filter for the spots: "heritage", "nature", "food", "cafe", or "landmark".',
+          anyOf: [{ type: 'string' }, { type: 'null' }],
+          description: 'Category filter (heritage, cafe, nature, food, landmark).',
         },
         city: {
-          type: 'string',
-          description: 'The city or region where the search should be conducted.',
+          anyOf: [{ type: 'string' }, { type: 'null' }],
+          description: 'City or region name.',
         },
         userCoordinates: {
-          type: 'array',
-          description: 'Optional current coordinates [longitude, latitude] of the user for "near me" or proximity searches.',
-          items: {
-            type: 'number',
-          },
+          type: ['array', 'null'],
+          items: { type: 'number' },
+          description: 'Coordinates [longitude, latitude] for near me searches.',
         },
         userLocation: {
-          type: 'object',
-          description: 'Optional live user location object with lat and lng properties.',
-          properties: {
-            lat: { type: 'number' },
-            lng: { type: 'number' },
-          },
+          anyOf: [
+            {
+              type: 'object',
+              properties: {
+                lat: { type: 'number' },
+                lng: { type: 'number' },
+              },
+            },
+            { type: 'null' },
+          ],
+          description: 'Optional live user location object.',
         },
       },
       required: ['query'],
@@ -71,40 +74,40 @@ export const searchPlacesDeclaration = {
 
 /**
  * Tool 3: calculate_route
- * Calculate distance, estimated duration, and order waypoints into an optimized itinerary.
+ * Calculate distance, estimated duration, and order waypoints into an itinerary.
  */
 export const calculateRouteDeclaration = {
   type: 'function',
   function: {
     name: 'calculate_route',
-    description: 'Calculate spatial distance, estimated transit duration, and compile ordered waypoints into a validated GeoJSON spatial path.',
+    description: 'Calculate spatial distance, transit duration, and order waypoints.',
     parameters: {
       type: 'object',
       properties: {
         locations: {
           type: 'array',
-          description: 'Ordered list of waypoint locations to include in the itinerary route.',
+          description: 'Ordered list of waypoint locations.',
           items: {
             type: 'object',
             properties: {
               name: {
                 type: 'string',
-                description: 'Name of the waypoint or stop.',
+                description: 'Name of the waypoint.',
               },
               coordinates: {
                 type: 'array',
-                description: 'Geospatial coordinates as a [longitude, latitude] pair.',
+                description: '[longitude, latitude] coordinates.',
                 items: {
                   type: 'number',
                 },
               },
               category: {
-                type: 'string',
-                description: 'Category of the waypoint (e.g. heritage, cafe, nature).',
+                anyOf: [{ type: 'string' }, { type: 'null' }],
+                description: 'Category of waypoint.',
               },
               description: {
-                type: 'string',
-                description: 'Brief overview or reason for visiting this waypoint.',
+                anyOf: [{ type: 'string' }, { type: 'null' }],
+                description: 'Brief overview.',
               },
             },
             required: ['name', 'coordinates'],
@@ -124,46 +127,50 @@ export const proposeItineraryDeclaration = {
   type: 'function',
   function: {
     name: 'propose_itinerary',
-    description: 'Package the finalized trip into an official GeoJSON FeatureCollection and trigger the Human Oversight gatekeeper for user approval before permanent database persistence.',
+    description: 'Package finalized route into GeoJSON and trigger human oversight gatekeeper.',
     parameters: {
       type: 'object',
       properties: {
         title: {
           type: 'string',
-          description: 'Title or theme of the proposed itinerary.',
+          description: 'Title of the proposed itinerary.',
         },
         locations: {
           type: 'array',
-          description: 'Final ordered list of locations with coordinates, names, and descriptions.',
+          description: 'Ordered list of locations with coordinates and names.',
           items: {
             type: 'object',
             properties: {
               name: { type: 'string' },
-              category: { type: 'string' },
+              category: {
+                anyOf: [{ type: 'string' }, { type: 'null' }],
+              },
               coordinates: {
                 type: 'array',
                 items: { type: 'number' },
               },
-              description: { type: 'string' },
+              description: {
+                anyOf: [{ type: 'string' }, { type: 'null' }],
+              },
             },
             required: ['name', 'coordinates'],
           },
         },
         totalDistanceKm: {
           type: 'number',
-          description: 'Total calculated route distance in kilometers.',
+          description: 'Total distance in kilometers.',
         },
         estimatedDurationMinutes: {
           type: 'number',
-          description: 'Total estimated transit and activity duration in minutes.',
+          description: 'Total duration in minutes.',
         },
         weatherNote: {
-          type: 'string',
-          description: 'Summary of destination weather conditions and trip advice.',
+          anyOf: [{ type: 'string' }, { type: 'null' }],
+          description: 'Weather advisory note.',
         },
         agentReasoning: {
-          type: 'string',
-          description: 'Brief explanation of why this route was organized this way.',
+          anyOf: [{ type: 'string' }, { type: 'null' }],
+          description: 'Explanation for itinerary route.',
         },
       },
       required: ['title', 'locations', 'totalDistanceKm', 'estimatedDurationMinutes'],

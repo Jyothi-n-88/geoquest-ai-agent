@@ -15,6 +15,7 @@ import {
 export default function App() {
   const [activeRoute, setActiveRoute] = useState(null);
   const [activeGeoJSON, setActiveGeoJSON] = useState(null);
+  const [userLocation, setUserLocation] = useState({ lat: 12.9716, lng: 77.5946 }); // Bengaluru default
   const [recentRoutes, setRecentRoutes] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [dbStatus, setDbStatus] = useState({ isConnected: false, status: 'connecting' });
@@ -89,20 +90,20 @@ export default function App() {
               <span className="font-bold text-base tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
                 GeoQuest
               </span>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono">
-                Phase 3: Split-Screen & Mapbox
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 font-mono font-medium">
+                Autonomous ReAct Engine
               </span>
             </div>
             <p className="text-[10px] text-slate-400 hidden sm:block">
-              Autonomous Spatial Planning ReAct Agent • Human Oversight Gatekeeper
+              Spatial Planning Agent • Groq LLaMA-3.3 • Human Oversight Gatekeeper
             </p>
           </div>
         </div>
 
         {/* Center / Right Badges */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           {/* Database Connectivity Badge */}
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700/60 text-xs">
+          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
             <Database className="h-3.5 w-3.5 text-emerald-400" />
             <span className="text-[11px] font-mono text-slate-300">
               MongoDB {dbStatus.isConnected ? 'Connected' : 'Offline'}
@@ -110,9 +111,9 @@ export default function App() {
           </div>
 
           {/* Model Status */}
-          <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700/60 text-xs">
-            <Cpu className="h-3.5 w-3.5 text-purple-400" />
-            <span className="text-[11px] font-mono text-slate-300">gemini-3.8-flash</span>
+          <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900/90 border border-amber-500/30 text-xs shadow-sm">
+            <Cpu className="h-3.5 w-3.5 text-amber-400" />
+            <span className="text-[11px] font-mono text-amber-300">llama-3.3-70b-versatile</span>
           </div>
 
           {/* History Drawer Toggle Button */}
@@ -134,6 +135,7 @@ export default function App() {
             activeRoute={activeRoute}
             onRouteGenerated={handleRouteGenerated}
             onRouteApproved={handleRouteApproved}
+            onLocationChange={(coords) => setUserLocation(coords)}
           />
         </section>
 
@@ -142,6 +144,7 @@ export default function App() {
           <Map
             geojson={activeGeoJSON}
             activeRoute={activeRoute}
+            userLocation={userLocation}
             onSelectWaypoint={(waypoint) => {
               console.log('Selected Waypoint:', waypoint);
             }}
