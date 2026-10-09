@@ -11,6 +11,25 @@ if (!globalThis.__geoquest_staged_routes__) {
 export const stagedRoutesMemoryStore = globalThis.__geoquest_staged_routes__;
 
 /**
+ * Dynamically extract the core spatial intent and search query from user prompt.
+ * Strips conversational filler like "find", "suggest", "spots", "near me", etc.
+ */
+export function extractSearchQuery(prompt) {
+  if (!prompt || typeof prompt !== 'string') return 'attractions';
+
+  let cleaned = prompt
+    .replace(/\b(can you|please|help me|find|suggest|search for|plan a|plan|curate|show me|discover|spots|places|trail|tour|walk|crawl)\b/gi, '')
+    .replace(/\b(near me|nearby|around here|around me|close to me|in my area|close by)\b/gi, '')
+    .replace(/\b(1-day|day trip|itinerary|with \d+ stops?|with \d+ curated spots?)\b/gi, '')
+    .trim();
+
+  // Strip leading/trailing punctuation and collapse multiple spaces
+  cleaned = cleaned.replace(/^[\s,.:;-]+|[\s,.:;-]+$/g, '').replace(/\s+/g, ' ');
+
+  return cleaned.length >= 2 ? cleaned : prompt;
+}
+
+/**
  * Helper to persist or stage route (MongoDB if online, Global Staging Memory if offline)
  */
 async function stageRouteForApproval({ userPrompt, proposedRoute, thoughts }) {
@@ -55,6 +74,7 @@ async function stageRouteForApproval({ userPrompt, proposedRoute, thoughts }) {
 
 /**
  * Deterministic ReAct cognitive runner (executes full tool pipeline if API key missing or transient API spike)
+ * Dynamically queries OpenStreetMap / live handlers using the extracted user intent
  */
 async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, toolCallsMade, reason = '' }) {
   if (reason) {
@@ -75,10 +95,13 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
     ? cityMatch[1]
     : 'Bengaluru';
 
+  // DYNAMIC SEARCH QUERY: extracted directly from user prompt (no hardcoded 'heritage and cafe')
+  const dynamicQuery = extractSearchQuery(prompt);
+
   thoughts.push(
     isNearMe
-      ? `Spatial ReAct Goal: Proximity discovery requested ("near me"). Anchoring search to coordinates: [${effectiveCoords[0]}, ${effectiveCoords[1]}].`
-      : `Spatial ReAct Goal: Planning itinerary for destination "${targetCity}".`
+      ? `Spatial ReAct Goal: Proximity discovery for "${dynamicQuery}" around live coordinates [${effectiveCoords[0].toFixed(4)}, ${effectiveCoords[1].toFixed(4)}].`
+      : `Spatial ReAct Goal: Discovering "${dynamicQuery}" in ${targetCity}.`
   );
 
   // 1. Fetch Weather
@@ -93,27 +116,27 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
   });
   thoughts.push(`Observed Weather: ${weatherRes.condition}, ${weatherRes.temperatureC}°C (${weatherRes.recommendation})`);
 
-  // 2. Search Places - Feeding userCoordinates directly rather than a hardcoded city center
+  // 2. Search Places - Dynamic live search via OpenStreetMap Nominatim with real userLocation
   const placesRes = await toolHandlers.search_places({
-    query: prompt,
+    query: dynamicQuery,
     category: '',
     city: isNearMe ? '' : targetCity,
     userCoordinates: effectiveCoords,
+    userLocation: effectiveCoords ? { lng: effectiveCoords[0], lat: effectiveCoords[1] } : null,
   });
   toolCallsMade.push({
     tool: 'search_places',
     args: {
-      query: prompt,
+      query: dynamicQuery,
       city: isNearMe ? '' : targetCity,
       userCoordinates: effectiveCoords,
+      userLocation: effectiveCoords ? { lng: effectiveCoords[0], lat: effectiveCoords[1] } : null,
     },
     output: placesRes,
     id: `call_${Date.now()}_2`,
   });
   thoughts.push(
-    isNearMe && effectiveCoords
-      ? `Located ${placesRes.count} venues situated within immediate proximity of coordinates [${effectiveCoords[0].toFixed(4)}, ${effectiveCoords[1].toFixed(4)}].`
-      : `Identified ${placesRes.count} candidate waypoints in ${targetCity}. Selecting optimal stops.`
+    `Identified ${placesRes.count} spatial waypoints for "${dynamicQuery}" (Source: ${placesRes.source || 'OpenStreetMap'}). Selecting optimal sequence.`
   );
 
   const selectedPlaces = placesRes.places.slice(0, 3);
@@ -130,8 +153,8 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
 
   // 4. Propose Itinerary (Human Oversight Gatekeeper)
   const proposalTitle = isNearMe
-    ? 'Local Proximity Discovery Trail (Near Me)'
-    : `${targetCity.charAt(0).toUpperCase() + targetCity.slice(1)} Curated Spatial Tour`;
+    ? `${dynamicQuery.charAt(0).toUpperCase() + dynamicQuery.slice(1)} Discovery Trail (Near Me)`
+    : `${targetCity.charAt(0).toUpperCase() + targetCity.slice(1)}: ${dynamicQuery.charAt(0).toUpperCase() + dynamicQuery.slice(1)} Tour`;
 
   const proposalRes = await toolHandlers.propose_itinerary({
     title: proposalTitle,
@@ -140,7 +163,7 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
     estimatedDurationMinutes: routeRes.estimatedDurationMinutes,
     weatherNote: `${weatherRes.condition}, ${weatherRes.temperatureC}°C.`,
     agentReasoning: isNearMe
-      ? `Curated an optimized walking and exploration loop relative to your current coordinates.`
+      ? `Curated an optimized exploration sequence for "${dynamicQuery}" around your active coordinates.`
       : `Organized an optimal trail from ${selectedPlaces[0]?.name || 'start'} to ${selectedPlaces[selectedPlaces.length - 1]?.name || 'finish'}.`,
   });
   toolCallsMade.push({
@@ -166,6 +189,35 @@ async function executeDeterministicReAct({ prompt, userCoordinates, thoughts, to
     status: 'requires_approval',
     message: 'Route proposal staged. Requires human confirmation before final database write.',
   };
+}
+
+/**
+ * Execute Gemini model call with 503 transient error retry and exponential backoff
+ */
+async function callGeminiWithBackoff(callFn, maxRetries = 1) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await callFn();
+    } catch (err) {
+      attempt++;
+      const isTransient =
+        err.status === 503 ||
+        err.code === 503 ||
+        String(err.message || '').includes('503') ||
+        String(err.message || '').includes('UNAVAILABLE') ||
+        String(err.message || '').includes('high demand') ||
+        String(err.message || '').includes('RESOURCE_EXHAUSTED');
+
+      if (isTransient && attempt <= maxRetries) {
+        const delayMs = attempt * 1500;
+        console.warn(`⚠️ [GeoQuest Agent] Gemini API hit 503/transient spike (${err.message}). Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
+        await new Promise((res) => setTimeout(res, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 /**
@@ -205,6 +257,9 @@ export async function handleAgentCommand(req, res) {
   const apiKey = process.env.GEMINI_API_KEY;
   const isKeyConfigured = apiKey && !apiKey.includes('MY_GEMINI_API_KEY') && apiKey.length > 10;
 
+  // Primary model target: gemini-2.5-flash for speed, high function calling fidelity, and high quota
+  const primaryModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
   // SYSTEM INSTRUCTION for GeoQuest ReAct Agent
   let systemInstruction = `You are GeoQuest, an elite Autonomous Spatial Planning ReAct Agent.
 Your mission is to interpret user trip commands, reason about spatial constraints, and use function calling tools to assemble an optimal itinerary.
@@ -221,7 +276,7 @@ OPERATIONAL PROTOCOL (ReAct Loop):
     const coordsToUse = userCoords || [77.5946, 12.9716];
     systemInstruction += `\n7. PROXIMITY & "NEAR ME" DIRECTIVE: The user's active coordinates are [longitude: ${coordsToUse[0]}, latitude: ${coordsToUse[1]}].
 The user prompt asks for spots 'near me', 'nearby', or 'around here'.
-You MUST pass userCoordinates: [${coordsToUse[0]}, ${coordsToUse[1]}] to 'search_places' and leave the 'city' parameter blank so the system discovers venues situated directly around their live coordinates instead of searching a hardcoded city center.
+You MUST pass userCoordinates: [${coordsToUse[0]}, ${coordsToUse[1]}] to 'search_places' and leave the 'city' parameter blank so the system discovers venues situated directly around their live coordinates via OpenStreetMap instead of searching a hardcoded city center.
 Then pass those discovered proximity waypoints into 'calculate_route' and 'propose_itinerary'.`;
   }
 
@@ -247,7 +302,6 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
       },
     });
 
-    const modelName = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
     const contents = [];
 
     if (Array.isArray(history) && history.length > 0) {
@@ -268,17 +322,20 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
 
       let response;
       try {
-        response = await ai.models.generateContent({
-          model: modelName,
-          contents,
-          config: {
-            systemInstruction,
-            tools: agentTools,
-            temperature: 0.2,
-          },
-        });
+        // Execute with transient retry and exponential backoff
+        response = await callGeminiWithBackoff(() =>
+          ai.models.generateContent({
+            model: primaryModel,
+            contents,
+            config: {
+              systemInstruction,
+              tools: agentTools,
+              temperature: 0.2,
+            },
+          })
+        );
       } catch (geminiError) {
-        console.warn(`⚠️ [GeoQuest Agent] Gemini call failed (${geminiError.message}). Fallback to resilient ReAct pipeline.`);
+        console.warn(`⚠️ [GeoQuest Agent] Gemini call failed after retry (${geminiError.message}). Fallback to resilient ReAct pipeline.`);
         const fallbackResponse = await executeDeterministicReAct({
           prompt,
           userCoordinates: userCoords,
@@ -315,9 +372,11 @@ Then pass those discovered proximity waypoints into 'calculate_route' and 'propo
         if (toolName === 'search_places') {
           if (isNearMe) {
             toolArgs.userCoordinates = userCoords || [77.5946, 12.9716];
+            toolArgs.userLocation = userCoords ? { lng: userCoords[0], lat: userCoords[1] } : null;
             toolArgs.city = ''; // Prevent searching hardcoded city center
           } else if (userCoords && !toolArgs.userCoordinates) {
             toolArgs.userCoordinates = userCoords;
+            toolArgs.userLocation = { lng: userCoords[0], lat: userCoords[1] };
           }
         }
 

@@ -52,6 +52,14 @@ export const searchPlacesDeclaration = {
           type: Type.NUMBER,
         },
       },
+      userLocation: {
+        type: Type.OBJECT,
+        description: 'Optional live user location object with lat and lng properties.',
+        properties: {
+          lat: { type: Type.NUMBER },
+          lng: { type: Type.NUMBER },
+        },
+      },
     },
     required: ['query'],
   },

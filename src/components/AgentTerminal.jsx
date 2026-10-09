@@ -31,7 +31,7 @@ export default function AgentTerminal({
   onRouteApproved,
 }) {
   const [prompt, setPrompt] = useState(
-    'Find specialty artisan cafes and scenic spots near me'
+    'Find Shiva temples spots near me'
   );
   const [loading, setLoading] = useState(false);
   const [agentResponse, setAgentResponse] = useState(null);
@@ -50,7 +50,7 @@ export default function AgentTerminal({
   const [userLocation, setUserLocation] = useState(null); // { lat, lng }
   const [geoStatus, setGeoStatus] = useState('detecting'); // 'detecting' | 'detected' | 'denied' | 'unsupported'
 
-  // Capture user coordinates using navigator.geolocation
+  // Capture user coordinates on mount or refresh
   const detectUserLocation = (showToastNotice = false) => {
     if (!('geolocation' in navigator)) {
       console.warn('⚠️ [GeoQuest GPS] Geolocation API not supported in this browser.');
@@ -61,10 +61,11 @@ export default function AgentTerminal({
     setGeoStatus('detecting');
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const { latitude, longitude } = position.coords;
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
         const coords = {
-          lat: Number(latitude.toFixed(5)),
-          lng: Number(longitude.toFixed(5)),
+          lat: Number(lat.toFixed(5)),
+          lng: Number(lng.toFixed(5)),
         };
         setUserLocation(coords);
         setGeoStatus('detected');
@@ -160,7 +161,7 @@ export default function AgentTerminal({
         setIsListening(true);
         setSpeechToast({
           type: 'info',
-          message: '🎙️ Listening... Speak your destination command (e.g., "Find cafes near me")',
+          message: '🎙️ Listening... Speak your destination command (e.g., "Find Shiva temples near me")',
         });
       };
 
@@ -212,14 +213,22 @@ export default function AgentTerminal({
   };
 
   const samplePrompts = [
+    'Find Shiva temples spots near me',
     'Find specialty artisan cafes and scenic spots near me',
-    'Plan an afternoon walking discovery trail around here',
     'Plan a 1-day heritage and cafe crawl in Bengaluru with 3 curated spots',
     'Find coastal heritage sights and specialty coffee in Mumbai',
   ];
 
-  // Submit Prompt to ReAct Agent endpoint with userLocation payload
-  const handleExecute = async (customPrompt) => {
+  /**
+   * Submit Prompt to ReAct Agent with Live Browser Geolocation
+   * 1. Checks if navigator.geolocation is available
+   * 2. Calls navigator.geolocation.getCurrentPosition()
+   * 3. Extracts lat = position.coords.latitude, lng = position.coords.longitude
+   * 4. Sends payload: { prompt: textToRun, userLocation: { lat, lng } }
+   * 5. Falls back to { prompt: textToRun } if denied or unavailable
+   * 6. Wraps fetch logic inside callbacks so it waits for GPS before executing
+   */
+  const handleExecute = (customPrompt) => {
     const textToRun = customPrompt || prompt;
     if (!textToRun.trim() || loading) return;
 
@@ -236,66 +245,76 @@ export default function AgentTerminal({
     setApprovalStatus(null);
     setSpeechToast(null);
 
-    // If geolocation hasn't been captured yet and browser supports it, do a quick capture
-    let activeCoords = userLocation;
-    if (!activeCoords && 'geolocation' in navigator && geoStatus !== 'denied') {
-      try {
-        await new Promise((resolve) => {
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              activeCoords = {
-                lat: Number(pos.coords.latitude.toFixed(5)),
-                lng: Number(pos.coords.longitude.toFixed(5)),
-              };
-              setUserLocation(activeCoords);
-              setGeoStatus('detected');
-              resolve();
-            },
-            () => resolve(),
-            { timeout: 2500 }
-          );
-        });
-      } catch {
-        // Proceed with null if timeout
-      }
-    }
+    // Inner sender function that performs the POST /api/agent/command fetch
+    const sendCommand = async (userLocationCoords) => {
+      const payload = userLocationCoords
+        ? { prompt: textToRun, userLocation: userLocationCoords }
+        : { prompt: textToRun };
 
-    // Payload includes userLocation: { lat, lng }
-    const payload = {
-      prompt: textToRun,
-      userLocation: activeCoords ? { lat: activeCoords.lat, lng: activeCoords.lng } : null,
+      console.log('🚀 [GeoQuest Command] Sending request to POST /api/agent/command:', payload);
+
+      try {
+        const res = await fetch('/api/agent/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        setAgentResponse(data);
+
+        if (data.proposedRoute) {
+          onRouteGenerated(data.proposedRoute, data.routeId);
+        }
+        if (data.status === 'requires_approval') {
+          setApprovalStatus('requires_approval');
+        }
+      } catch (err) {
+        console.error('❌ [GeoQuest Command Error]:', err);
+        setAgentResponse({
+          success: false,
+          thoughts: [`Error during ReAct execution: ${err.message}`],
+          toolCallsMade: [],
+          proposedRoute: null,
+          routeId: null,
+          status: 'completed',
+          message: 'Failed to communicate with agent endpoint.',
+        });
+      } finally {
+        setLoading(false);
+      }
     };
 
-    console.log('🚀 [GeoQuest Command] Sending request to POST /api/agent/command:', payload);
-
-    try {
-      const res = await fetch('/api/agent/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      setAgentResponse(data);
-
-      if (data.proposedRoute) {
-        onRouteGenerated(data.proposedRoute, data.routeId);
-      }
-      if (data.status === 'requires_approval') {
-        setApprovalStatus('requires_approval');
-      }
-    } catch (err) {
-      console.error('❌ [GeoQuest Command Error]:', err);
-      setAgentResponse({
-        success: false,
-        thoughts: [`Error during ReAct execution: ${err.message}`],
-        toolCallsMade: [],
-        proposedRoute: null,
-        routeId: null,
-        status: 'completed',
-        message: 'Failed to communicate with agent endpoint.',
-      });
-    } finally {
-      setLoading(false);
+    // Check if navigator.geolocation is available in browser
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        // Success callback: extract coordinates and send userLocation payload
+        (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          const coords = {
+            lat: Number(lat.toFixed(5)),
+            lng: Number(lng.toFixed(5)),
+          };
+          setUserLocation(coords);
+          setGeoStatus('detected');
+          sendCommand({ lat, lng });
+        },
+        // Error callback: user denied permissions or timeout; gracefully fall back
+        (error) => {
+          console.warn('⚠️ [GeoQuest GPS] Geolocation permission denied or failed:', error.message);
+          setGeoStatus('denied');
+          sendCommand(null);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 6000,
+          maximumAge: 60000,
+        }
+      );
+    } else {
+      // Browser does not support geolocation; send prompt only
+      setGeoStatus('unsupported');
+      sendCommand(null);
     }
   };
 
@@ -350,7 +369,7 @@ export default function AgentTerminal({
             <h1 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
               GeoQuest ReAct Agent
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800">
-                gemini-3.8-flash
+                gemini-2.5-flash
               </span>
             </h1>
             <p className="text-[11px] text-slate-400">Autonomous Spatial Planning Console</p>
