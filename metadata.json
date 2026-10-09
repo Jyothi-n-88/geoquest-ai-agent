@@ -1,0 +1,6 @@
+{
+  "name": "GeoQuest - Autonomous Spatial Planning ReAct Agent",
+  "description": "Autonomous spatial planning agent utilizing Gemini API function calling, MongoDB Atlas, and Mapbox GL JS for interactive route planning with human oversight.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
